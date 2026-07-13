@@ -120,7 +120,7 @@ El workflow solo reacciona a un título `[SYNTHETIC]` con la etiqueta exacta `sr
 .\scripts\recover-incident.ps1
 ```
 
-Se crea una revisión nueva con retención desactivada. El script valida cesta, alta, pedido y seguimiento, comprueba `AllocationBytes=0` y busca una muestra inferior al umbral.
+Si la retención está activa, se crea una revisión nueva con retención desactivada; si ya está en `0`, se reutiliza la revisión sana. El script valida cesta, alta, pedido y seguimiento, comprueba `AllocationBytes=0` y busca una muestra inferior al umbral.
 
 ## 10. Costes y limpieza
 

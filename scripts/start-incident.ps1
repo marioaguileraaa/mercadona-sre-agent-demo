@@ -4,6 +4,7 @@ param(
     [string] $SubscriptionId = '5305e853-a63b-4b82-9a3f-6fde18c1a798',
     [string] $ResourceGroupName = 'rg-mercadona-sre-agent-v1',
     [string] $BackendAppName = 'ca-mercadona-retail-api',
+    [string] $BackendContainerName = 'mercadona-retail-api',
     [int] $RequestCount = 64,
     [int] $MetricTimeoutSeconds = 600
 )
@@ -15,26 +16,40 @@ if ($RequestCount -ne 64) {
 }
 
 Assert-DemoAzureContext -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName
-$previousRevision = Get-LatestContainerAppRevision `
+$previousRevision = Get-ActiveContainerAppRevision `
     -SubscriptionId $SubscriptionId `
     -ResourceGroupName $ResourceGroupName `
     -ContainerAppName $BackendAppName
-
-az containerapp update `
-    --subscription $SubscriptionId `
-    --resource-group $ResourceGroupName `
-    --name $BackendAppName `
-    --set-env-vars DEMO_CART_MEMORY_MB_PER_ADD=10 DEMO_CART_MEMORY_MAX_MB=640 `
-    --output none
-if ($LASTEXITCODE -ne 0) {
-    throw 'Failed to enable the deterministic cart-memory incident.'
+$currentMemoryPerAdd = Get-ContainerAppRevisionEnvironmentVariableValue `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -ContainerAppName $BackendAppName `
+    -RevisionName $previousRevision.name `
+    -VariableName 'DEMO_CART_MEMORY_MB_PER_ADD'
+if ($currentMemoryPerAdd -ne '0') {
+    throw "The incident requires DEMO_CART_MEMORY_MB_PER_ADD=0 as its healthy baseline, but found '$currentMemoryPerAdd'. Run recovery before starting another incident."
 }
+
+$revisionSuffix = "i-$([DateTimeOffset]::UtcNow.ToString('yyMMddHHmmss'))-$([Guid]::NewGuid().ToString('N').Substring(0, 4))"
+$expectedRevisionName = "$BackendAppName--$revisionSuffix"
+
+New-ContainerAppRevisionFromActiveTemplate `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -ContainerAppName $BackendAppName `
+    -SourceRevisionName $previousRevision.name `
+    -ContainerName $BackendContainerName `
+    -RevisionSuffix $revisionSuffix `
+    -EnvironmentVariables @{
+        DEMO_CART_MEMORY_MB_PER_ADD = '10'
+        DEMO_CART_MEMORY_MAX_MB = '640'
+    }
 
 $revision = Wait-ContainerAppRevision `
     -SubscriptionId $SubscriptionId `
     -ResourceGroupName $ResourceGroupName `
     -ContainerAppName $BackendAppName `
-    -PreviousRevisionName $previousRevision.name
+    -ExpectedRevisionName $expectedRevisionName
 
 $fqdn = az containerapp show `
     --subscription $SubscriptionId `
