@@ -155,7 +155,7 @@ if ($trackingResponse.StatusCode -ne 200) {
 }
 
 $frontendResponse = Invoke-WebRequest -Method Get -Uri "$frontendOrigin/" -SkipHttpErrorCheck
-if ($frontendResponse.StatusCode -ne 200 -or $frontendResponse.Content -notmatch 'Mercadona Reliability Lab') {
+if ($frontendResponse.StatusCode -ne 200 -or $frontendResponse.Content -notmatch '<title>Mercado Verde') {
     throw "Frontend smoke failed. HTTP $($frontendResponse.StatusCode)."
 }
 
