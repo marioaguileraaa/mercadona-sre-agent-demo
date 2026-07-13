@@ -62,10 +62,11 @@ test('renders the original Mercado Verde identity and persistent synthetic discl
   render(<App />);
 
   expect(await screen.findByRole('button', { name: 'Mercado Verde, ir al inicio' })).toBeInTheDocument();
-  expect(screen.getByText(/Fictional technical SRE demo/)).toBeInTheDocument();
+  expect(screen.queryByText(/Fictional technical SRE demo/)).not.toBeInTheDocument();
   expect(screen.getAllByText(/Demo técnica SRE ficticia/)).toHaveLength(2);
   expect(screen.getAllByText(/No es un sistema oficial de Mercadona/)).toHaveLength(2);
   expect(screen.getByRole('heading', { name: /Lo cotidiano/ })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Ver carrito, 0 productos' })).toBeDisabled();
 });
 
 test('selects a store, filters its catalog and handles an empty result', async () => {
@@ -76,6 +77,8 @@ test('selects a store, filters its catalog and handles an empty result', async (
   expect(await screen.findByText(product.name)).toBeInTheDocument();
   expect(retailApi.getProducts).toHaveBeenCalledWith(store.id);
   expect(retailApi.createCart).toHaveBeenCalledWith(store.id);
+  expect(screen.getByRole('button', { name: 'Tienda seleccionada' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Ver carrito, 0 productos' })).toBeEnabled();
 
   fireEvent.change(screen.getByRole('textbox', { name: 'Buscar productos sintéticos' }), {
     target: { value: 'sin coincidencias' },
@@ -84,20 +87,30 @@ test('selects a store, filters its catalog and handles an empty result', async (
   expect(screen.getByRole('heading', { name: 'No encontramos coincidencias' })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Ver todos los productos' }));
   expect(screen.getByText(product.name)).toBeInTheDocument();
+
+  const allFilter = screen.getByRole('button', { name: 'Todo' });
+  const produceFilter = screen.getByRole('button', { name: 'Fruta y verdura' });
+  expect(allFilter).toHaveAttribute('aria-pressed', 'true');
+  expect(produceFilter).toHaveAttribute('aria-pressed', 'false');
+  fireEvent.click(produceFilter);
+  expect(allFilter).toHaveAttribute('aria-pressed', 'false');
+  expect(produceFilter).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('adds through the cart API and completes checkout with tracking', async () => {
+  const orderId = 'ORDER-1234567890abcdef1234567890abcdef';
+  const trackingCode = 'TRACK-abcdef1234567890abcdef1234567890';
   (retailApi.addCartItem as jest.Mock).mockResolvedValue({
     cart: cartWithItem,
     correlationId: 'CORR-ADD',
   });
   (retailApi.createOrder as jest.Mock).mockResolvedValue({
     order: {
-      id: 'ORDER-1',
+      id: orderId,
       cartId: emptyCart.id,
       storeId: store.id,
       status: 'Confirmado',
-      trackingCode: 'TRACK-1',
+      trackingCode,
       createdAt: '2026-07-13T12:05:00Z',
       items: cartWithItem.items,
       total: product.price,
@@ -106,8 +119,8 @@ test('adds through the cart API and completes checkout with tracking', async () 
   });
   (retailApi.getTracking as jest.Mock).mockResolvedValue({
     tracking: {
-      orderId: 'ORDER-1',
-      trackingCode: 'TRACK-1',
+      orderId,
+      trackingCode,
       status: 'Preparing',
       updatedAt: '2026-07-13T12:06:00Z',
       message: 'Synthetic order is being prepared for the demo.',
@@ -128,10 +141,37 @@ test('adds through the cart API and completes checkout with tracking', async () 
 
   expect(await screen.findByRole('heading', { name: '¡Tu cesta ya está en marcha!' })).toBeInTheDocument();
   expect(retailApi.createOrder).toHaveBeenCalledWith(emptyCart.id);
-  expect(retailApi.getTracking).toHaveBeenCalledWith('ORDER-1');
-  expect(screen.getByText('TRACK-1')).toBeInTheDocument();
+  expect(retailApi.getTracking).toHaveBeenCalledWith(orderId);
+  expect(screen.getByText(orderId)).toBeInTheDocument();
+  expect(screen.getByText(trackingCode)).toBeInTheDocument();
   expect(screen.getByText(/Estado: en preparación/)).toBeInTheDocument();
   expect(screen.getByText(/El pedido sintético se está preparando para la demo/)).toBeInTheDocument();
+});
+
+test('respects reduced-motion preferences when navigating between sections', async () => {
+  const scrollIntoView = jest.fn();
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: scrollIntoView,
+  });
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: jest.fn().mockReturnValue({
+      matches: true,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      addListener: jest.fn(),
+      removeListener: jest.fn(),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    }),
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Tiendas' }));
+
+  expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' });
 });
 
 test('shows a recoverable error when synthetic stores cannot load', async () => {

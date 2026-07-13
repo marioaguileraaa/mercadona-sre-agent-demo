@@ -13,7 +13,13 @@
   box-sizing: border-box;
 }
 
-section {
+#inicio,
+#tiendas,
+#como-funciona,
+#categorias,
+#catalogo,
+#carrito,
+#pedido {
   scroll-margin-top: 154px;
 }
 
@@ -94,6 +100,17 @@ section {
   border-color: transparent;
 }
 
+.header-search .MuiInputBase-input::placeholder {
+  color: #47554c;
+  opacity: 1;
+}
+
+.header-search .MuiInputBase-input.Mui-disabled::placeholder {
+  color: #5b685f;
+  -webkit-text-fill-color: #5b685f;
+  opacity: 1;
+}
+
 .main-nav {
   display: flex;
   gap: 2px;
@@ -104,6 +121,11 @@ section {
   height: 48px;
   color: var(--green) !important;
   background: var(--green-pale) !important;
+}
+
+.cart-button-wrapper {
+  display: inline-flex;
+  border-radius: 50%;
 }
 
 .hero-section {
@@ -396,7 +418,11 @@ section {
   transform: translateY(-4px);
   border-color: #acc5b2;
   box-shadow: 0 18px 46px rgba(31, 42, 36, 0.08);
-  outline: none;
+}
+
+.category-card:focus-visible {
+  outline: 3px solid var(--green-dark);
+  outline-offset: 3px;
 }
 
 .category-card.active {
@@ -614,7 +640,7 @@ section {
 .order-card {
   padding: clamp(28px, 5vw, 54px);
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.4fr);
   gap: 26px;
   align-items: center;
   color: #fff !important;
@@ -639,11 +665,14 @@ section {
 }
 
 .order-details {
-  display: flex;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 28px;
 }
 
 .order-details span {
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
@@ -651,6 +680,11 @@ section {
 .order-details small {
   margin-bottom: 4px;
   color: #b9cabe;
+}
+
+.order-details strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .status-region {
@@ -753,7 +787,13 @@ section {
 }
 
 @media (max-width: 899px) {
-  section {
+  #inicio,
+  #tiendas,
+  #como-funciona,
+  #categorias,
+  #catalogo,
+  #carrito,
+  #pedido {
     scroll-margin-top: 136px;
   }
 
@@ -930,7 +970,7 @@ section {
 
   .order-details {
     grid-column: auto;
-    flex-direction: column;
+    grid-template-columns: 1fr;
     gap: 14px;
   }
 

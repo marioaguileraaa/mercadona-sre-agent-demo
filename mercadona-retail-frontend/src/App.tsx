@@ -41,9 +41,6 @@ import { retailApi } from './services/api';
 import { Cart, Order, Product, Store, Tracking } from './types';
 import './App.css';
 
-const disclaimer =
-  'Fictional technical SRE demo. Not an official Mercadona system. All stores, products, prices, carts, orders, correlation IDs and metrics are synthetic; no claims about real operations.';
-
 const spanishDisclaimer =
   'Demo técnica SRE ficticia. No es un sistema oficial de Mercadona. Todas las tiendas, productos, precios, cestas, pedidos, identificadores de correlación y métricas son sintéticos; no se afirma nada sobre operaciones reales.';
 
@@ -172,7 +169,13 @@ function App() {
   }, [activeCategory, products, query]);
 
   const scrollTo = (id: string) => {
-    document.getElementById(id)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    const reduceMotion =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    document.getElementById(id)?.scrollIntoView?.({
+      behavior: reduceMotion ? 'auto' : 'smooth',
+      block: 'start',
+    });
   };
 
   const chooseStore = async (store: Store) => {
@@ -283,15 +286,18 @@ function App() {
             </Box>
 
             <Tooltip title="Ver carrito sintético">
-              <IconButton
-                className="cart-button"
-                aria-label={`Ver carrito, ${cartCount} productos`}
-                onClick={() => scrollTo('carrito')}
-              >
-                <Badge badgeContent={cartCount} color="secondary">
-                  <ShoppingBasketOutlinedIcon />
-                </Badge>
-              </IconButton>
+              <span className="cart-button-wrapper">
+                <IconButton
+                  className="cart-button"
+                  aria-label={`Ver carrito, ${cartCount} productos`}
+                  onClick={() => scrollTo('carrito')}
+                  disabled={!cart}
+                >
+                  <Badge badgeContent={cartCount} color="secondary">
+                    <ShoppingBasketOutlinedIcon />
+                  </Badge>
+                </IconButton>
+              </span>
             </Tooltip>
           </Container>
         </Box>
@@ -395,7 +401,7 @@ function App() {
                             variant={isSelected ? 'contained' : 'outlined'}
                             endIcon={<ChevronRightIcon />}
                             onClick={() => chooseStore(store)}
-                            disabled={busy}
+                            disabled={busy || isSelected}
                           >
                             {isSelected ? 'Tienda seleccionada' : 'Comprar aquí'}
                           </Button>
@@ -465,6 +471,7 @@ function App() {
                           variant={activeCategory === category ? 'contained' : 'outlined'}
                           size="small"
                           onClick={() => setActiveCategory(category)}
+                          aria-pressed={activeCategory === category}
                         >
                           {category === 'All' ? 'Todo' : category}
                         </Button>
@@ -642,9 +649,6 @@ function App() {
             </Box>
             <Divider />
             <Typography variant="caption" className="footer-disclaimer">{spanishDisclaimer}</Typography>
-            <Typography variant="caption" className="footer-disclaimer required-disclaimer">
-              {disclaimer}
-            </Typography>
           </Container>
         </Box>
 
