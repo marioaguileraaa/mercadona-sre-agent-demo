@@ -1,0 +1,8 @@
+{
+  "short_name": "Retail Lab",
+  "name": "Mercadona Synthetic Reliability Lab",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#126B3A",
+  "background_color": "#F7FAF5"
+}

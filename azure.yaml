@@ -1,0 +1,13 @@
+name: mercadona-retail-sre-demo
+metadata:
+  template: mercadona-retail-sre-agent-demo@1.0.0
+
+services:
+  api:
+    project: ./MercadonaRetail.Api
+    language: dotnet
+    host: containerapp
+  frontend:
+    project: ./mercadona-retail-frontend
+    language: js
+    host: containerapp
