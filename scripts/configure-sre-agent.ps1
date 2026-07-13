@@ -23,11 +23,197 @@ $triggerBridgeDeploymentName = 'mercadona-sre-trigger-bridge'
 $agentResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/agents/$AgentName"
 $agentArmUrl = "https://management.azure.com${agentResourceId}"
 
+function ConvertFrom-Base64Url {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Value
+    )
+
+    $normalizedValue = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($Value) -or $Value -notmatch '^[A-Za-z0-9_-]+$') {
+            throw 'The JWT payload segment was not valid base64url.'
+        }
+
+        $normalizedValue = $Value.Replace('-', '+').Replace('_', '/')
+        switch ($normalizedValue.Length % 4) {
+            0 { break }
+            2 { $normalizedValue += '==' }
+            3 { $normalizedValue += '=' }
+            default { throw 'The JWT payload segment had invalid base64url padding.' }
+        }
+
+        try {
+            return [Convert]::FromBase64String($normalizedValue)
+        } catch {
+            throw 'The JWT payload segment was not valid base64url.'
+        }
+    } finally {
+        $Value = $null
+        $normalizedValue = $null
+    }
+}
+
+function Get-ArmAccessTokenIdentity {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $AccessToken
+    )
+
+    $tokenParts = $null
+    $payloadSegment = $null
+    $payloadBytes = $null
+    $payloadJson = $null
+    $payload = $null
+    $utf8 = $null
+    $oidProperty = $null
+    $tidProperty = $null
+    $tenantId = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($AccessToken)) {
+            throw 'The Azure Resource Manager access token was empty.'
+        }
+
+        $tokenParts = $AccessToken.Split('.')
+        if ($tokenParts.Count -ne 3 -or [string]::IsNullOrWhiteSpace($tokenParts[1])) {
+            throw 'The Azure Resource Manager access token was not a valid three-segment JWT.'
+        }
+
+        $payloadSegment = $tokenParts[1]
+        $payloadBytes = ConvertFrom-Base64Url -Value $payloadSegment
+        try {
+            $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+            $payloadJson = $utf8.GetString($payloadBytes)
+            $payload = $payloadJson | ConvertFrom-Json
+        } catch {
+            throw 'The Azure Resource Manager access token JWT payload was not valid UTF-8 JSON.'
+        }
+
+        if ($null -ne $payload) {
+            $oidProperty = $payload.PSObject.Properties['oid']
+        }
+        if ($null -eq $oidProperty -or [string]::IsNullOrWhiteSpace([string] $oidProperty.Value)) {
+            throw 'The Azure Resource Manager access token JWT payload did not contain a nonblank oid claim.'
+        }
+
+        $tidProperty = $payload.PSObject.Properties['tid']
+        $tenantId = if ($null -ne $tidProperty -and
+            -not [string]::IsNullOrWhiteSpace([string] $tidProperty.Value)) {
+            [string] $tidProperty.Value
+        } else {
+            $null
+        }
+
+        return [PSCustomObject]@{
+            Oid = [string] $oidProperty.Value
+            Tid = $tenantId
+        }
+    } finally {
+        if ($null -ne $payloadBytes) {
+            [Array]::Clear($payloadBytes, 0, $payloadBytes.Length)
+        }
+        if ($null -ne $tokenParts) {
+            [Array]::Clear($tokenParts, 0, $tokenParts.Length)
+        }
+        $AccessToken = $null
+        $tokenParts = $null
+        $payloadSegment = $null
+        $payloadBytes = $null
+        $payloadJson = $null
+        $payload = $null
+        $utf8 = $null
+        $oidProperty = $null
+        $tidProperty = $null
+        $tenantId = $null
+    }
+}
+
 Assert-DemoAzureContext -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName
 
-$signedInUserId = az ad signed-in-user show --query id --output tsv
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($signedInUserId)) {
-    throw 'A signed-in Azure user is required to configure the SRE Agent data plane.'
+$signedInUserId = az ad signed-in-user show --query id --output tsv 2>$null
+if ($LASTEXITCODE -ne 0) {
+    $signedInUserId = $null
+}
+if ([string]::IsNullOrWhiteSpace($signedInUserId)) {
+    $armAccessToken = $null
+    $armIdentity = $null
+    $currentAccountJson = $null
+    $currentAccount = $null
+    $currentTenantId = $null
+    $tenantIdProperty = $null
+    $userTypeProperty = $null
+    try {
+        $currentAccountJson = az account show `
+            --subscription $SubscriptionId `
+            --query '{tenantId:tenantId,userType:user.type}' `
+            --output json 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($currentAccountJson)) {
+            throw 'Microsoft Graph could not identify the signed-in user, and the target subscription Azure CLI account context could not be verified.'
+        }
+        try {
+            $currentAccount = $currentAccountJson | ConvertFrom-Json
+        } catch {
+            throw 'The target subscription Azure CLI account context was not valid JSON.'
+        }
+
+        $tenantIdProperty = $currentAccount.PSObject.Properties['tenantId']
+        if ($null -eq $tenantIdProperty -or
+            [string]::IsNullOrWhiteSpace([string] $tenantIdProperty.Value)) {
+            throw 'The target subscription Azure CLI account context did not expose a tenant ID.'
+        }
+        $currentTenantId = [string] $tenantIdProperty.Value
+
+        $userTypeProperty = $currentAccount.PSObject.Properties['userType']
+        if ($null -eq $userTypeProperty -or
+            -not [string]::Equals(
+                [string] $userTypeProperty.Value,
+                'user',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw 'The secure oid fallback requires an interactive user Azure CLI account for the target subscription.'
+        }
+
+        $armAccessToken = az account get-access-token `
+            --subscription $SubscriptionId `
+            --resource 'https://management.azure.com/' `
+            --query accessToken `
+            --output tsv 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($armAccessToken)) {
+            throw 'Microsoft Graph could not identify the signed-in user, and an Azure Resource Manager access token could not be acquired for the secure local oid fallback.'
+        }
+
+        $armIdentity = Get-ArmAccessTokenIdentity -AccessToken $armAccessToken
+        $armAccessToken = $null
+        $oidProperty = $armIdentity.PSObject.Properties['Oid']
+        $signedInUserId = [string] $oidProperty.Value
+
+        $tidProperty = $armIdentity.PSObject.Properties['Tid']
+        if ($null -eq $tidProperty -or [string]::IsNullOrWhiteSpace([string] $tidProperty.Value)) {
+            throw 'The Azure Resource Manager access token JWT payload did not contain a nonblank tid claim required to verify the target subscription tenant.'
+        }
+        if (-not [string]::Equals(
+                [string] $tidProperty.Value,
+                $currentTenantId,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw 'The Azure Resource Manager access token tenant did not match the target subscription tenant.'
+        }
+    } finally {
+        $armAccessToken = $null
+        $armIdentity = $null
+        $currentAccountJson = $null
+        $currentAccount = $null
+        $currentTenantId = $null
+        $oidProperty = $null
+        $tidProperty = $null
+        $tenantIdProperty = $null
+        $userTypeProperty = $null
+    }
+}
+if ([string]::IsNullOrWhiteSpace($signedInUserId)) {
+    throw 'Unable to determine the signed-in Azure user object ID from Microsoft Graph or the Azure Resource Manager access token oid claim.'
 }
 
 $existingAdminAssignments = az role assignment list `

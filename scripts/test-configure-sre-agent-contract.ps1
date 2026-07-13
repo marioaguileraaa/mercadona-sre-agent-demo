@@ -17,7 +17,12 @@ if ($parseErrors.Count -gt 0) {
     throw "configure-sre-agent.ps1 has parser errors: $($parseErrors.Message -join '; ')"
 }
 
-$requiredFunctions = @('Get-OptionalPropertyValue', 'Get-FirstOptionalPropertyValue')
+$requiredFunctions = @(
+    'ConvertFrom-Base64Url',
+    'Get-ArmAccessTokenIdentity',
+    'Get-OptionalPropertyValue',
+    'Get-FirstOptionalPropertyValue'
+)
 foreach ($functionName in $requiredFunctions) {
     $functionAst = $scriptAst.Find({
         param($node)
@@ -53,6 +58,103 @@ function ConvertFrom-TestJson {
 
     return $Json | ConvertFrom-Json
 }
+
+function ConvertTo-TestBase64Url {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Value
+    )
+
+    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value)).
+        TrimEnd('=').
+        Replace('+', '-').
+        Replace('/', '_')
+}
+
+function New-TestJwt {
+    param(
+        [Parameter(Mandatory)]
+        [string] $PayloadJson
+    )
+
+    $header = ConvertTo-TestBase64Url -Value '{"alg":"none"}'
+    $payload = ConvertTo-TestBase64Url -Value $PayloadJson
+    return "$header.$payload.synthetic-signature"
+}
+
+function Assert-Throws {
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock] $Action,
+        [Parameter(Mandatory)]
+        [string] $ExpectedMessage,
+        [Parameter(Mandatory)]
+        [string] $Case
+    )
+
+    try {
+        & $Action
+    } catch {
+        if ($_.Exception.Message -ne $ExpectedMessage) {
+            throw "$Case failed. Expected error '$ExpectedMessage', got '$($_.Exception.Message)'."
+        }
+        return
+    }
+    throw "$Case failed. Expected an exception."
+}
+
+$base64UrlBytes = ConvertFrom-Base64Url -Value '-_8'
+Assert-Equal `
+    -Actual ([Convert]::ToHexString($base64UrlBytes)) `
+    -Expected 'FBFF' `
+    -Case 'Base64url alphabet normalization and padding'
+
+$syntheticOid = '11111111-2222-3333-4444-555555555555'
+$syntheticTenantId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+$identity = Get-ArmAccessTokenIdentity -AccessToken (
+    New-TestJwt -PayloadJson "{`"oid`":`"$syntheticOid`",`"tid`":`"$syntheticTenantId`"}"
+)
+Assert-Equal -Actual $identity.Oid -Expected $syntheticOid -Case 'JWT oid claim decoding'
+Assert-Equal -Actual $identity.Tid -Expected $syntheticTenantId -Case 'JWT tid claim decoding'
+
+$identityWithoutTenant = Get-ArmAccessTokenIdentity -AccessToken (
+    New-TestJwt -PayloadJson "{`"oid`":`"$syntheticOid`"}"
+)
+Assert-Equal -Actual $identityWithoutTenant.Oid -Expected $syntheticOid -Case 'JWT oid without optional tid'
+Assert-Equal -Actual $identityWithoutTenant.Tid -Expected $null -Case 'Missing optional tid under strict mode'
+
+Assert-Throws `
+    -Action { Get-ArmAccessTokenIdentity -AccessToken '' } `
+    -ExpectedMessage 'The Azure Resource Manager access token was empty.' `
+    -Case 'Empty ARM token'
+Assert-Throws `
+    -Action { Get-ArmAccessTokenIdentity -AccessToken 'not-a-jwt' } `
+    -ExpectedMessage 'The Azure Resource Manager access token was not a valid three-segment JWT.' `
+    -Case 'Invalid JWT structure'
+Assert-Throws `
+    -Action { Get-ArmAccessTokenIdentity -AccessToken 'header..signature' } `
+    -ExpectedMessage 'The Azure Resource Manager access token was not a valid three-segment JWT.' `
+    -Case 'Missing JWT payload'
+Assert-Throws `
+    -Action { Get-ArmAccessTokenIdentity -AccessToken 'header.*.signature' } `
+    -ExpectedMessage 'The JWT payload segment was not valid base64url.' `
+    -Case 'Invalid JWT payload base64url'
+Assert-Throws `
+    -Action { Get-ArmAccessTokenIdentity -AccessToken 'header.bm90LWpzb24.signature' } `
+    -ExpectedMessage 'The Azure Resource Manager access token JWT payload was not valid UTF-8 JSON.' `
+    -Case 'Invalid JWT payload JSON'
+Assert-Throws `
+    -Action { Get-ArmAccessTokenIdentity -AccessToken (New-TestJwt -PayloadJson '{}') } `
+    -ExpectedMessage 'The Azure Resource Manager access token JWT payload did not contain a nonblank oid claim.' `
+    -Case 'Missing JWT oid'
+Assert-Throws `
+    -Action { Get-ArmAccessTokenIdentity -AccessToken (New-TestJwt -PayloadJson 'null') } `
+    -ExpectedMessage 'The Azure Resource Manager access token JWT payload did not contain a nonblank oid claim.' `
+    -Case 'Null JWT payload under strict mode'
+Assert-Throws `
+    -Action { Get-ArmAccessTokenIdentity -AccessToken (New-TestJwt -PayloadJson '{"oid":" "}') } `
+    -ExpectedMessage 'The Azure Resource Manager access token JWT payload did not contain a nonblank oid claim.' `
+    -Case 'Blank JWT oid'
 
 $missingProperties = ConvertFrom-TestJson -Json '{}'
 Assert-Equal `
@@ -152,9 +254,53 @@ Assert-Equal `
     -Case 'Top-level triggerId fallback'
 
 $source = Get-Content -LiteralPath $scriptPath -Raw
+$sensitiveVariablePattern = '(?i)\$(?:[A-Za-z]+:)?[A-Za-z0-9_]*(?:accessToken|token|payload)[A-Za-z0-9_]*'
+$disallowedSensitiveCommands = @(
+    'Set-Content',
+    'Add-Content',
+    'Out-File',
+    'Export-Clixml',
+    'Export-Csv',
+    'Tee-Object'
+)
+$commandAsts = $scriptAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst]
+}, $true)
+foreach ($commandAst in $commandAsts) {
+    $commandName = $commandAst.GetCommandName()
+    $writesOutput = $null -ne $commandName -and $commandName -like 'Write-*'
+    $persistsContent = $commandName -in $disallowedSensitiveCommands
+    if (($writesOutput -or $persistsContent) -and
+        $commandAst.Extent.Text -match $sensitiveVariablePattern) {
+        throw "Sensitive token or payload material was sent to '$commandName'."
+    }
+}
+if ($source -notmatch '(?s)function Get-ArmAccessTokenIdentity.*?finally\s*\{.*?\$AccessToken\s*=\s*\$null.*?\$payload\s*=\s*\$null') {
+    throw 'ARM access token and decoded payload variables were not cleared in the identity helper finally block.'
+}
+if ($source -notmatch 'az ad signed-in-user show --query id --output tsv 2>\$null') {
+    throw 'The primary Graph signed-in-user lookup or stderr suppression was not preserved.'
+}
+if (-not $source.Contains('az account get-access-token', [StringComparison]::Ordinal) -or
+    -not $source.Contains('--subscription $SubscriptionId', [StringComparison]::Ordinal) -or
+    -not $source.Contains("--resource 'https://management.azure.com/'", [StringComparison]::Ordinal) -or
+    -not $source.Contains('--query accessToken', [StringComparison]::Ordinal)) {
+    throw 'The subscription-scoped ARM access token fallback contract was not found.'
+}
+if (-not $source.Contains('az account show', [StringComparison]::Ordinal) -or
+    -not $source.Contains("--query '{tenantId:tenantId,userType:user.type}'", [StringComparison]::Ordinal) -or
+    -not $source.Contains("'user'", [StringComparison]::Ordinal) -or
+    -not $source.Contains('[StringComparison]::OrdinalIgnoreCase', [StringComparison]::Ordinal)) {
+    throw 'The fallback Azure CLI account user and tenant validation contract was not found.'
+}
 foreach ($expectedError in @(
         'Existing HTTP trigger did not expose an ID.',
-        'HTTP trigger configuration did not return an ID.'
+        'HTTP trigger configuration did not return an ID.',
+        'The Azure Resource Manager access token JWT payload did not contain a nonblank oid claim.',
+        'The secure oid fallback requires an interactive user Azure CLI account for the target subscription.',
+        'The Azure Resource Manager access token JWT payload did not contain a nonblank tid claim required to verify the target subscription tenant.',
+        'The Azure Resource Manager access token tenant did not match the target subscription tenant.'
     )) {
     if (-not $source.Contains($expectedError, [StringComparison]::Ordinal)) {
         throw "Explicit missing-ID error was not preserved: '$expectedError'"
