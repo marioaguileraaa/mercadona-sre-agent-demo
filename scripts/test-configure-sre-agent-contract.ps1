@@ -283,15 +283,24 @@ if ($source -notmatch 'az ad signed-in-user show --query id --output tsv 2>\$nul
     throw 'The primary Graph signed-in-user lookup or stderr suppression was not preserved.'
 }
 if (-not $source.Contains('az account get-access-token', [StringComparison]::Ordinal) -or
+    -not $source.Contains('--subscription $SubscriptionId', [StringComparison]::Ordinal) -or
     -not $source.Contains("--resource 'https://management.azure.com/'", [StringComparison]::Ordinal) -or
     -not $source.Contains('--query accessToken', [StringComparison]::Ordinal)) {
-    throw 'The ARM access token fallback contract was not found.'
+    throw 'The subscription-scoped ARM access token fallback contract was not found.'
+}
+if (-not $source.Contains('az account show', [StringComparison]::Ordinal) -or
+    -not $source.Contains("--query '{tenantId:tenantId,userType:user.type}'", [StringComparison]::Ordinal) -or
+    -not $source.Contains("'user'", [StringComparison]::Ordinal) -or
+    -not $source.Contains('[StringComparison]::OrdinalIgnoreCase', [StringComparison]::Ordinal)) {
+    throw 'The fallback Azure CLI account user and tenant validation contract was not found.'
 }
 foreach ($expectedError in @(
         'Existing HTTP trigger did not expose an ID.',
         'HTTP trigger configuration did not return an ID.',
         'The Azure Resource Manager access token JWT payload did not contain a nonblank oid claim.',
-        'The Azure Resource Manager access token tenant did not match the current subscription tenant.'
+        'The secure oid fallback requires an interactive user Azure CLI account for the target subscription.',
+        'The Azure Resource Manager access token JWT payload did not contain a nonblank tid claim required to verify the target subscription tenant.',
+        'The Azure Resource Manager access token tenant did not match the target subscription tenant.'
     )) {
     if (-not $source.Contains($expectedError, [StringComparison]::Ordinal)) {
         throw "Explicit missing-ID error was not preserved: '$expectedError'"

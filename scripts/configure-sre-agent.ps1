@@ -139,9 +139,44 @@ if ($LASTEXITCODE -ne 0) {
 if ([string]::IsNullOrWhiteSpace($signedInUserId)) {
     $armAccessToken = $null
     $armIdentity = $null
+    $currentAccountJson = $null
+    $currentAccount = $null
     $currentTenantId = $null
+    $tenantIdProperty = $null
+    $userTypeProperty = $null
     try {
+        $currentAccountJson = az account show `
+            --subscription $SubscriptionId `
+            --query '{tenantId:tenantId,userType:user.type}' `
+            --output json 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($currentAccountJson)) {
+            throw 'Microsoft Graph could not identify the signed-in user, and the target subscription Azure CLI account context could not be verified.'
+        }
+        try {
+            $currentAccount = $currentAccountJson | ConvertFrom-Json
+        } catch {
+            throw 'The target subscription Azure CLI account context was not valid JSON.'
+        }
+
+        $tenantIdProperty = $currentAccount.PSObject.Properties['tenantId']
+        if ($null -eq $tenantIdProperty -or
+            [string]::IsNullOrWhiteSpace([string] $tenantIdProperty.Value)) {
+            throw 'The target subscription Azure CLI account context did not expose a tenant ID.'
+        }
+        $currentTenantId = [string] $tenantIdProperty.Value
+
+        $userTypeProperty = $currentAccount.PSObject.Properties['userType']
+        if ($null -eq $userTypeProperty -or
+            -not [string]::Equals(
+                [string] $userTypeProperty.Value,
+                'user',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw 'The secure oid fallback requires an interactive user Azure CLI account for the target subscription.'
+        }
+
         $armAccessToken = az account get-access-token `
+            --subscription $SubscriptionId `
             --resource 'https://management.azure.com/' `
             --query accessToken `
             --output tsv 2>$null
@@ -154,26 +189,27 @@ if ([string]::IsNullOrWhiteSpace($signedInUserId)) {
         $oidProperty = $armIdentity.PSObject.Properties['Oid']
         $signedInUserId = [string] $oidProperty.Value
 
-        $currentTenantId = az account show --query tenantId --output tsv 2>$null
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($currentTenantId)) {
-            $tidProperty = $armIdentity.PSObject.Properties['Tid']
-            if ($null -eq $tidProperty -or [string]::IsNullOrWhiteSpace([string] $tidProperty.Value)) {
-                throw 'The Azure Resource Manager access token JWT payload did not contain a nonblank tid claim required to verify the current subscription tenant.'
-            }
-            if (-not [string]::Equals(
-                    [string] $tidProperty.Value,
-                    $currentTenantId,
-                    [StringComparison]::OrdinalIgnoreCase
-                )) {
-                throw 'The Azure Resource Manager access token tenant did not match the current subscription tenant.'
-            }
+        $tidProperty = $armIdentity.PSObject.Properties['Tid']
+        if ($null -eq $tidProperty -or [string]::IsNullOrWhiteSpace([string] $tidProperty.Value)) {
+            throw 'The Azure Resource Manager access token JWT payload did not contain a nonblank tid claim required to verify the target subscription tenant.'
+        }
+        if (-not [string]::Equals(
+                [string] $tidProperty.Value,
+                $currentTenantId,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw 'The Azure Resource Manager access token tenant did not match the target subscription tenant.'
         }
     } finally {
         $armAccessToken = $null
         $armIdentity = $null
+        $currentAccountJson = $null
+        $currentAccount = $null
         $currentTenantId = $null
         $oidProperty = $null
         $tidProperty = $null
+        $tenantIdProperty = $null
+        $userTypeProperty = $null
     }
 }
 if ([string]::IsNullOrWhiteSpace($signedInUserId)) {
