@@ -38,6 +38,10 @@ dist/
 .azure/
 *.azurepubxml
 
+# Generated Bicep build output
+infra/main.json
+infra/trigger-bridge.json
+
 # Docker
 
 # OS generated files
