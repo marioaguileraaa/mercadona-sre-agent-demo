@@ -108,7 +108,7 @@ Expected result in roughly 3-10 minutes:
 .\scripts\recover-incident.ps1
 ```
 
-Recovery creates a new process with retention disabled, verifies cart/add/order/tracking, and checks for a below-threshold sample. The old retained heap disappears with the old revision.
+Recovery creates a new process when retention is active, or safely reuses the healthy revision when it is already disabled. It verifies cart/add/order/tracking and checks for a below-threshold sample. The old retained heap disappears with the old revision.
 
 If the metric alert is delayed, use the workflow's **Run workflow** action with an ID beginning `SYNTH-`. This is an emergency demonstration fallback, not a bypass of Review mode.
 

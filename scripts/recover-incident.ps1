@@ -4,31 +4,57 @@ param(
     [string] $SubscriptionId = '5305e853-a63b-4b82-9a3f-6fde18c1a798',
     [string] $ResourceGroupName = 'rg-mercadona-sre-agent-v1',
     [string] $BackendAppName = 'ca-mercadona-retail-api',
+    [string] $BackendContainerName = 'mercadona-retail-api',
     [int] $MetricTimeoutSeconds = 300
 )
 
 . "$PSScriptRoot\AzureDemo.Common.ps1"
 
 Assert-DemoAzureContext -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName
-$previousRevision = Get-LatestContainerAppRevision `
+$previousRevision = Get-ActiveContainerAppRevision `
     -SubscriptionId $SubscriptionId `
     -ResourceGroupName $ResourceGroupName `
     -ContainerAppName $BackendAppName
-az containerapp update `
-    --subscription $SubscriptionId `
-    --resource-group $ResourceGroupName `
-    --name $BackendAppName `
-    --set-env-vars DEMO_CART_MEMORY_MB_PER_ADD=0 DEMO_CART_MEMORY_MAX_MB=640 `
-    --output none
-if ($LASTEXITCODE -ne 0) {
-    throw 'Failed to disable the deterministic cart-memory incident.'
-}
-
-$revision = Wait-ContainerAppRevision `
+$currentMemoryPerAdd = Get-ContainerAppRevisionEnvironmentVariableValue `
     -SubscriptionId $SubscriptionId `
     -ResourceGroupName $ResourceGroupName `
     -ContainerAppName $BackendAppName `
-    -PreviousRevisionName $previousRevision.name
+    -RevisionName $previousRevision.name `
+    -VariableName 'DEMO_CART_MEMORY_MB_PER_ADD'
+Assert-ContainerAppSingleReadyRevision `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -ContainerAppName $BackendAppName `
+    -ExpectedRevisionName $previousRevision.name
+
+if ($currentMemoryPerAdd -ne '0') {
+    $revisionSuffix = "r-$([DateTimeOffset]::UtcNow.ToString('yyMMddHHmmss'))-$([Guid]::NewGuid().ToString('N').Substring(0, 4))"
+    $expectedRevisionName = "$BackendAppName--$revisionSuffix"
+    New-ContainerAppRevisionFromActiveTemplate `
+        -SubscriptionId $SubscriptionId `
+        -ResourceGroupName $ResourceGroupName `
+        -ContainerAppName $BackendAppName `
+        -SourceRevisionName $previousRevision.name `
+        -ContainerName $BackendContainerName `
+        -RevisionSuffix $revisionSuffix `
+        -EnvironmentVariables @{
+            DEMO_CART_MEMORY_MB_PER_ADD = '0'
+            DEMO_CART_MEMORY_MAX_MB = '640'
+        }
+
+    $revision = Wait-ContainerAppRevision `
+        -SubscriptionId $SubscriptionId `
+        -ResourceGroupName $ResourceGroupName `
+        -ContainerAppName $BackendAppName `
+        -ExpectedRevisionName $expectedRevisionName
+} else {
+    $revision = Wait-ContainerAppRevision `
+        -SubscriptionId $SubscriptionId `
+        -ResourceGroupName $ResourceGroupName `
+        -ContainerAppName $BackendAppName `
+        -ExpectedRevisionName $previousRevision.name
+    Write-Host 'Retention was already disabled; reusing the healthy active revision.'
+}
 $recoveryStartedAt = [DateTimeOffset]::UtcNow
 
 $fqdn = az containerapp show `
