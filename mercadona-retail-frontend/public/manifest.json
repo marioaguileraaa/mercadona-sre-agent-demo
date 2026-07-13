@@ -1,6 +1,6 @@
 {
-  "short_name": "Retail Lab",
-  "name": "Mercadona Synthetic Reliability Lab",
+  "short_name": "Mercado Verde",
+  "name": "Mercado Verde, demo retail SRE ficticia",
   "start_url": ".",
   "display": "standalone",
   "theme_color": "#126B3A",
