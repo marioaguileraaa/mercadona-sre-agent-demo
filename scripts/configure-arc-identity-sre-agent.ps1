@@ -58,6 +58,74 @@ function Assert-ArcIdentityOwnedSreResource {
     }
 }
 
+function Assert-ArcIdentitySreAgentSafety {
+    param(
+        [Parameter(Mandatory)]
+        [object] $Agent,
+        [Parameter(Mandatory)]
+        [string] $ExpectedIdentity
+    )
+
+    $agentProperties = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $Agent `
+        -PropertyName 'properties'
+    $actionConfiguration = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $agentProperties `
+        -PropertyName 'actionConfiguration'
+    if ((Get-ArcIdentityOptionalPropertyValue `
+                -InputObject $actionConfiguration `
+                -PropertyName 'mode') -ne 'Review' -or
+        (Get-ArcIdentityOptionalPropertyValue `
+                -InputObject $actionConfiguration `
+                -PropertyName 'accessLevel') -ne 'Low') {
+        throw 'Azure SRE Agent must already be configured as Review/Low; this script will not broaden it.'
+    }
+    if (-not [string]::Equals(
+            [string] (
+                Get-ArcIdentityOptionalPropertyValue `
+                    -InputObject $actionConfiguration `
+                    -PropertyName 'identity'
+            ),
+            $ExpectedIdentity,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Azure SRE Agent action identity is not the expected existing UAMI.'
+    }
+}
+
+function Assert-ArcIdentitySreExtensionResourceCollisions {
+    param(
+        [Parameter(Mandatory)]
+        [string] $SubscriptionId,
+        [Parameter(Mandatory)]
+        [string] $AgentResourceId,
+        [Parameter(Mandatory)]
+        [string] $ApiVersion,
+        [Parameter(Mandatory)]
+        [object[]] $ResourceContracts
+    )
+
+    try {
+        $null = Connect-ArcIdentitySreAgentApi `
+            -SubscriptionId $SubscriptionId `
+            -AgentResourceId $AgentResourceId `
+            -ApiVersion $ApiVersion
+        foreach ($resourceContract in $ResourceContracts) {
+            $existingResource = Invoke-ArcIdentitySreAgentApi `
+                -Method Get `
+                -Path $resourceContract.Path `
+                -Body $null `
+                -AllowNotFound
+            Assert-ArcIdentityOwnedSreResource `
+                -ExistingResource $existingResource `
+                -ExpectedName $resourceContract.Name `
+                -ExpectedType $resourceContract.Type
+        }
+    } finally {
+        Disconnect-ArcIdentitySreAgentApi
+    }
+}
+
 $readerRoleId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
 $monitoringReaderRoleId = '43d0d8ad-25c7-4714-9337-8ba259a9fe05'
 $logAnalyticsReaderRoleId = '73c42c96-874c-492b-b04d-ab87d138a893'
@@ -98,70 +166,22 @@ if ([string]::IsNullOrWhiteSpace($srePrincipalId) -or
     throw "Managed identity '$SreIdentityName' did not expose principal and resource IDs."
 }
 
-$agent = Invoke-ArcIdentityAzJson `
-    -Arguments @(
-        'rest',
-        '--method', 'get',
-        '--url', "https://management.azure.com${agentResourceId}?api-version=$previewApiVersion",
-        '--output', 'json'
-    ) `
-    -FailureMessage "Unable to read SRE Agent '$AgentName'."
+$agent = Wait-ArcIdentitySreAgentProvisioningSucceeded `
+    -SubscriptionId $SubscriptionId `
+    -AgentResourceId $agentResourceId `
+    -ApiVersion $previewApiVersion
+Assert-ArcIdentitySreAgentSafety `
+    -Agent $agent `
+    -ExpectedIdentity $sreIdentityResourceId
 $agentProperties = Get-ArcIdentityOptionalPropertyValue -InputObject $agent -PropertyName 'properties'
-$actionConfiguration = Get-ArcIdentityOptionalPropertyValue `
-    -InputObject $agentProperties `
-    -PropertyName 'actionConfiguration'
-if ((Get-ArcIdentityOptionalPropertyValue `
-            -InputObject $actionConfiguration `
-            -PropertyName 'mode') -ne 'Review' -or
-    (Get-ArcIdentityOptionalPropertyValue `
-            -InputObject $actionConfiguration `
-            -PropertyName 'accessLevel') -ne 'Low') {
-    throw 'Azure SRE Agent must already be configured as Review/Low; this script will not broaden it.'
-}
-if (-not [string]::Equals(
-        [string] (
-            Get-ArcIdentityOptionalPropertyValue `
-                -InputObject $actionConfiguration `
-                -PropertyName 'identity'
-        ),
-        $sreIdentityResourceId,
-        [StringComparison]::OrdinalIgnoreCase
-    )) {
-    throw 'Azure SRE Agent action identity is not the expected existing UAMI.'
-}
 
-$managedResources = [System.Collections.Generic.List[string]]::new()
 $knowledgeGraphConfiguration = Get-ArcIdentityOptionalPropertyValue `
     -InputObject $agentProperties `
     -PropertyName 'knowledgeGraphConfiguration'
-$existingManagedResources = Get-ArcIdentityOptionalPropertyValue `
-    -InputObject $knowledgeGraphConfiguration `
-    -PropertyName 'managedResources'
-foreach ($managedResource in @($existingManagedResources)) {
-    if ([string]::IsNullOrWhiteSpace([string] $managedResource)) {
-        continue
-    }
-    if ($null -eq ($managedResources | Where-Object {
-                [string]::Equals(
-                    [string] $_,
-                    [string] $managedResource,
-                    [StringComparison]::OrdinalIgnoreCase
-                )
-            } | Select-Object -First 1)) {
-        $managedResources.Add([string] $managedResource)
-    }
-}
-foreach ($requiredResource in @($sreResourceGroupId, $arcResourceGroupId)) {
-    if ($null -eq ($managedResources | Where-Object {
-                [string]::Equals(
-                    [string] $_,
-                    $requiredResource,
-                    [StringComparison]::OrdinalIgnoreCase
-                )
-            } | Select-Object -First 1)) {
-        $managedResources.Add($requiredResource)
-    }
-}
+$knowledgeGraphPlan = Get-ArcIdentityKnowledgeGraphConfigurationPlan `
+    -ExistingConfiguration $knowledgeGraphConfiguration `
+    -ExpectedIdentity $sreIdentityResourceId `
+    -RequiredManagedResources @($sreResourceGroupId, $arcResourceGroupId)
 
 $connectorName = 'arcbox-log-analytics'
 $connectorList = Invoke-ArcIdentityAzJson `
@@ -235,25 +255,6 @@ $sreExtensionResources = @(
         Path = '/api/v2/extendedAgent/scheduledtasks/identity-infrastructure-weekday-report'
     }
 )
-try {
-    $null = Connect-ArcIdentitySreAgentApi `
-        -SubscriptionId $SubscriptionId `
-        -AgentResourceId $agentResourceId `
-        -ApiVersion $previewApiVersion
-    foreach ($resourceContract in $sreExtensionResources) {
-        $existingResource = Invoke-ArcIdentitySreAgentApi `
-            -Method Get `
-            -Path $resourceContract.Path `
-            -Body $null `
-            -AllowNotFound
-        Assert-ArcIdentityOwnedSreResource `
-            -ExistingResource $existingResource `
-            -ExpectedName $resourceContract.Name `
-            -ExpectedType $resourceContract.Type
-    }
-} finally {
-    Disconnect-ArcIdentitySreAgentApi
-}
 
 Write-Host 'Planned additive SRE Agent configuration:'
 Write-Host "- Reader and Monitoring Reader at $arcResourceGroupId"
@@ -261,6 +262,11 @@ Write-Host "- Log Analytics Reader at $workspaceResourceId"
 Write-Host '- ArcBox LAW connector, identity-infrastructure subagent/skill, Sev2 filter, and weekday Review report'
 Write-Host '- No Autonomous mode, High access, identity remediation, receiver, or existing connector replacement'
 if (-not $Apply) {
+    Assert-ArcIdentitySreExtensionResourceCollisions `
+        -SubscriptionId $SubscriptionId `
+        -AgentResourceId $agentResourceId `
+        -ApiVersion $previewApiVersion `
+        -ResourceContracts $sreExtensionResources
     Write-Host 'No Azure configuration was changed. Rerun with -Apply after reviewing this plan.'
     return
 }
@@ -287,21 +293,47 @@ Ensure-ArcIdentityRoleAssignment `
     -RoleDefinitionId $logAnalyticsReaderRoleId `
     -Scope $workspaceResourceId
 
-$knowledgeGraphPatch = @{
-    properties = @{
-        knowledgeGraphConfiguration = @{
-            identity = $sreIdentityResourceId
-            managedResources = $managedResources.ToArray()
+$knowledgeGraphPatch = $null
+if ($knowledgeGraphPlan.RequiresPatch) {
+    $knowledgeGraphPatch = @{
+        properties = @{
+            knowledgeGraphConfiguration = @{
+                identity = $knowledgeGraphPlan.Identity
+                managedResources = $knowledgeGraphPlan.ManagedResources
+            }
         }
     }
+    Invoke-ArcIdentityArmRestWithJsonBody `
+        -Method 'patch' `
+        -Url "https://management.azure.com${agentResourceId}?api-version=$previewApiVersion" `
+        -Headers @('Content-Type=application/json') `
+        -Body $knowledgeGraphPatch `
+        -Output 'none' `
+        -FailureMessage 'Unable to add the ArcBox resource group to SRE Agent managed resources.'
+    $agentAfterKnowledgeGraphPatch = Wait-ArcIdentitySreAgentProvisioningSucceeded `
+        -SubscriptionId $SubscriptionId `
+        -AgentResourceId $agentResourceId `
+        -ApiVersion $previewApiVersion
+    Assert-ArcIdentitySreAgentSafety `
+        -Agent $agentAfterKnowledgeGraphPatch `
+        -ExpectedIdentity $sreIdentityResourceId
+    $updatedAgentProperties = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $agentAfterKnowledgeGraphPatch `
+        -PropertyName 'properties'
+    $updatedKnowledgeGraphConfiguration = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $updatedAgentProperties `
+        -PropertyName 'knowledgeGraphConfiguration'
+    $updatedKnowledgeGraphPlan = Get-ArcIdentityKnowledgeGraphConfigurationPlan `
+        -ExistingConfiguration $updatedKnowledgeGraphConfiguration `
+        -ExpectedIdentity $sreIdentityResourceId `
+        -RequiredManagedResources @($sreResourceGroupId, $arcResourceGroupId)
+    if ($updatedKnowledgeGraphPlan.RequiresPatch) {
+        throw 'SRE Agent knowledge graph did not reach the exact required identity and managed-resource state.'
+    }
+    $agent = $agentAfterKnowledgeGraphPatch
+} else {
+    Write-Host 'Reusing existing exact SRE Agent knowledge graph configuration.'
 }
-Invoke-ArcIdentityArmRestWithJsonBody `
-    -Method 'patch' `
-    -Url "https://management.azure.com${agentResourceId}?api-version=$previewApiVersion" `
-    -Headers @('Content-Type=application/json') `
-    -Body $knowledgeGraphPatch `
-    -Output 'none' `
-    -FailureMessage 'Unable to add the ArcBox resource group to SRE Agent managed resources.'
 
 $connectorBody = @{
     properties = @{
@@ -324,9 +356,23 @@ if ($null -eq $existingConnector) {
         -Body $connectorBody `
         -Output 'none' `
         -FailureMessage 'Unable to configure the additive ArcBox Log Analytics connector.'
+    $agentAfterConnectorPut = Wait-ArcIdentitySreAgentProvisioningSucceeded `
+        -SubscriptionId $SubscriptionId `
+        -AgentResourceId $agentResourceId `
+        -ApiVersion $previewApiVersion
+    Assert-ArcIdentitySreAgentSafety `
+        -Agent $agentAfterConnectorPut `
+        -ExpectedIdentity $sreIdentityResourceId
+    $agent = $agentAfterConnectorPut
 } else {
     Write-Host "Reusing existing exact-scope connector '$connectorName'."
 }
+
+Assert-ArcIdentitySreExtensionResourceCollisions `
+    -SubscriptionId $SubscriptionId `
+    -AgentResourceId $agentResourceId `
+    -ApiVersion $previewApiVersion `
+    -ResourceContracts $sreExtensionResources
 
 $skill = @{
     name = 'identity-infrastructure-operations'
@@ -476,14 +522,10 @@ try {
     Disconnect-ArcIdentitySreAgentApi
 }
 
-$verifiedAgent = Invoke-ArcIdentityAzJson `
-    -Arguments @(
-        'rest',
-        '--method', 'get',
-        '--url', "https://management.azure.com${agentResourceId}?api-version=$previewApiVersion",
-        '--output', 'json'
-    ) `
-    -FailureMessage 'Unable to verify the final SRE Agent ARM configuration.'
+$verifiedAgent = Wait-ArcIdentitySreAgentProvisioningSucceeded `
+    -SubscriptionId $SubscriptionId `
+    -AgentResourceId $agentResourceId `
+    -ApiVersion $previewApiVersion
 $verifiedAgentProperties = Get-ArcIdentityOptionalPropertyValue `
     -InputObject $verifiedAgent `
     -PropertyName 'properties'

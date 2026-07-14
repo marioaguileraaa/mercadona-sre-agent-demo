@@ -453,6 +453,74 @@ function Invoke-ArcIdentityArmRestBodyProbe {
     }
 }
 
+function Invoke-ArcIdentitySreAgentWaitProbe {
+    param(
+        [Parameter(Mandatory)]
+        [object[]] $ProvisioningStates,
+        [int] $TimeoutSeconds = 1,
+        [int] $PollIntervalSeconds = 0
+    )
+
+    $subscriptionId = '11111111-2222-3333-4444-555555555555'
+    $agentResourceId = "/subscriptions/$subscriptionId/resourceGroups/rg-sre/providers/Microsoft.App/agents/sre-agent"
+    $apiVersion = '2025-05-01-preview'
+    $expectedUrl = "https://management.azure.com${agentResourceId}?api-version=$apiVersion"
+    $states = [System.Collections.Generic.Queue[object]]::new()
+    foreach ($state in $ProvisioningStates) {
+        $states.Enqueue($state)
+    }
+    $calls = [System.Collections.Generic.List[object]]::new()
+
+    function az {
+        [string[]] $azArguments = @($args | ForEach-Object { [string] $_ })
+        $global:LASTEXITCODE = 0
+        $calls.Add([pscustomobject]@{
+                Arguments = [string[]] $azArguments.Clone()
+            })
+        if ($states.Count -eq 0) {
+            throw 'The fake Azure CLI provisioning-state queue was exhausted.'
+        }
+
+        $state = $states.Dequeue()
+        $properties = [ordered]@{}
+        if ([string] $state -cne '<missing>') {
+            $properties.provisioningState = $state
+        }
+        return ConvertTo-Json -InputObject ([ordered]@{
+                marker = $calls.Count
+                properties = $properties
+            }) -Depth 5 -Compress
+    }
+
+    $agent = $null
+    $errorMessage = $null
+    try {
+        $agent = Wait-ArcIdentitySreAgentProvisioningSucceeded `
+            -SubscriptionId $subscriptionId `
+            -AgentResourceId $agentResourceId `
+            -ApiVersion $apiVersion `
+            -TimeoutSeconds $TimeoutSeconds `
+            -PollIntervalSeconds $PollIntervalSeconds
+    } catch {
+        $errorMessage = $_.Exception.Message
+    } finally {
+        $global:LASTEXITCODE = 0
+    }
+
+    return [pscustomobject]@{
+        Agent = $agent
+        Calls = @($calls)
+        ErrorMessage = $errorMessage
+        ExpectedArguments = @(
+            'rest',
+            '--method', 'get',
+            '--subscription', $subscriptionId,
+            '--url', $expectedUrl,
+            '--output', 'json'
+        )
+    }
+}
+
 $newScriptNames = @(
     'ArcIdentity.Common.ps1',
     'deploy-arc-identity.ps1',
@@ -556,6 +624,117 @@ $wrappedItems = '{"value":[{"name":"one"},{"name":"two"}]}' | ConvertFrom-Json
 $responseItems = @(Get-ArcIdentityResponseItems -Response $wrappedItems)
 Assert-True -Condition ($responseItems.Count -eq 2) -Case 'Wrapped Azure list response'
 Assert-True -Condition ($responseItems[1].name -eq 'two') -Case 'Wrapped Azure list item shape'
+
+$immediateWaitProbe = Invoke-ArcIdentitySreAgentWaitProbe -ProvisioningStates @('Succeeded')
+Assert-True -Condition ($null -eq $immediateWaitProbe.ErrorMessage) -Case 'Immediate SRE Agent success'
+Assert-True -Condition ($immediateWaitProbe.Calls.Count -eq 1) -Case 'Immediate SRE Agent single GET'
+Assert-True `
+    -Condition (
+        ($immediateWaitProbe.Calls[0].Arguments -join "`0") -ceq
+        ($immediateWaitProbe.ExpectedArguments -join "`0")
+    ) `
+    -Case 'SRE Agent wait exact subscription resource ID and API'
+Assert-True -Condition ($immediateWaitProbe.Agent.marker -eq 1) -Case 'Immediate SRE Agent object return'
+
+$transitionWaitProbe = Invoke-ArcIdentitySreAgentWaitProbe `
+    -ProvisioningStates @('InProgress', 'Succeeded')
+Assert-True -Condition ($null -eq $transitionWaitProbe.ErrorMessage) -Case 'SRE Agent transition success'
+Assert-True -Condition ($transitionWaitProbe.Calls.Count -eq 2) -Case 'SRE Agent transition polls once'
+Assert-True -Condition ($transitionWaitProbe.Agent.marker -eq 2) -Case 'SRE Agent refreshed object return'
+
+$failureWaitProbe = Invoke-ArcIdentitySreAgentWaitProbe -ProvisioningStates @('Failed')
+Assert-True -Condition ($failureWaitProbe.Calls.Count -eq 1) -Case 'SRE Agent terminal failure is immediate'
+Assert-True `
+    -Condition (
+        $failureWaitProbe.ErrorMessage -ceq
+        "Azure SRE Agent provisioning reached terminal state 'Failed'."
+    ) `
+    -Case 'SRE Agent terminal failure message'
+
+$timeoutWaitProbe = Invoke-ArcIdentitySreAgentWaitProbe `
+    -ProvisioningStates @('InProgress') `
+    -TimeoutSeconds 0
+Assert-True -Condition ($timeoutWaitProbe.Calls.Count -eq 1) -Case 'SRE Agent zero-timeout single GET'
+Assert-True `
+    -Condition (
+        $timeoutWaitProbe.ErrorMessage -ceq
+        "Azure SRE Agent did not reach provisioning state 'Succeeded' within 0 seconds. Last observed state: 'InProgress'."
+    ) `
+    -Case 'SRE Agent timeout includes last state'
+
+$missingStateWaitProbe = Invoke-ArcIdentitySreAgentWaitProbe -ProvisioningStates @('<missing>')
+Assert-True -Condition ($missingStateWaitProbe.Calls.Count -eq 1) -Case 'Missing SRE Agent state is immediate'
+Assert-True `
+    -Condition (
+        $missingStateWaitProbe.ErrorMessage -ceq
+        "Azure SRE Agent provisioning state was missing or invalid. Last observed state: '<missing>'."
+    ) `
+    -Case 'Missing SRE Agent state error'
+
+$invalidStateWaitProbe = Invoke-ArcIdentitySreAgentWaitProbe -ProvisioningStates @(42)
+Assert-True -Condition ($invalidStateWaitProbe.Calls.Count -eq 1) -Case 'Invalid SRE Agent state is immediate'
+Assert-True `
+    -Condition (
+        $invalidStateWaitProbe.ErrorMessage -ceq
+        "Azure SRE Agent provisioning state was missing or invalid. Last observed state: '42'."
+    ) `
+    -Case 'Invalid SRE Agent state error includes observed value'
+
+$knowledgeGraphSubscriptionId = '11111111-2222-3333-4444-555555555555'
+$knowledgeGraphSreResourceGroupId = "/subscriptions/$knowledgeGraphSubscriptionId/resourceGroups/rg-sre"
+$knowledgeGraphArcResourceGroupId = "/subscriptions/$knowledgeGraphSubscriptionId/resourceGroups/rg-arc"
+$knowledgeGraphExistingResourceGroupId = "/subscriptions/$knowledgeGraphSubscriptionId/resourceGroups/rg-existing"
+$knowledgeGraphIdentityId = "$knowledgeGraphSreResourceGroupId/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-sre"
+$exactKnowledgeGraphPlan = Get-ArcIdentityKnowledgeGraphConfigurationPlan `
+    -ExistingConfiguration ([pscustomobject]@{
+        identity = $knowledgeGraphIdentityId.ToUpperInvariant()
+        managedResources = @(
+            $knowledgeGraphArcResourceGroupId.ToUpperInvariant(),
+            $knowledgeGraphSreResourceGroupId.ToUpperInvariant()
+        )
+    }) `
+    -ExpectedIdentity $knowledgeGraphIdentityId `
+    -RequiredManagedResources @(
+        $knowledgeGraphSreResourceGroupId,
+        $knowledgeGraphArcResourceGroupId
+    )
+Assert-True -Condition (-not $exactKnowledgeGraphPlan.RequiresPatch) -Case 'Exact knowledge graph skips PATCH'
+Assert-True `
+    -Condition (
+        ($exactKnowledgeGraphPlan.ManagedResources -join "`0") -ceq
+        (@(
+                $knowledgeGraphArcResourceGroupId.ToUpperInvariant(),
+                $knowledgeGraphSreResourceGroupId.ToUpperInvariant()
+            ) -join "`0")
+    ) `
+    -Case 'Exact knowledge graph preserves existing resource order'
+
+$missingKnowledgeGraphPlan = Get-ArcIdentityKnowledgeGraphConfigurationPlan `
+    -ExistingConfiguration ([pscustomobject]@{
+        identity = $knowledgeGraphIdentityId
+        managedResources = @(
+            $knowledgeGraphExistingResourceGroupId,
+            $knowledgeGraphSreResourceGroupId.ToUpperInvariant(),
+            ' ',
+            $knowledgeGraphExistingResourceGroupId.ToUpperInvariant()
+        )
+    }) `
+    -ExpectedIdentity $knowledgeGraphIdentityId `
+    -RequiredManagedResources @(
+        $knowledgeGraphSreResourceGroupId,
+        $knowledgeGraphArcResourceGroupId
+    )
+Assert-True -Condition $missingKnowledgeGraphPlan.RequiresPatch -Case 'Missing resource causes one PATCH decision'
+Assert-True `
+    -Condition (
+        ($missingKnowledgeGraphPlan.ManagedResources -join "`0") -ceq
+        (@(
+                $knowledgeGraphExistingResourceGroupId,
+                $knowledgeGraphSreResourceGroupId.ToUpperInvariant(),
+                $knowledgeGraphArcResourceGroupId
+            ) -join "`0")
+    ) `
+    -Case 'Knowledge graph appends one missing required scope without duplicates'
 
 $armRestBodyProbe = Invoke-ArcIdentityArmRestBodyProbe
 $armRestCalls = @($armRestBodyProbe.Calls)
@@ -954,6 +1133,77 @@ Assert-Contains -Source $configureSource -Expected '-Body $knowledgeGraphPatch' 
 Assert-Contains -Source $configureSource -Expected "-Method 'patch'" -Case 'Knowledge graph helper method'
 Assert-Contains -Source $configureSource -Expected '-Body $connectorBody' -Case 'Connector helper body'
 Assert-Contains -Source $configureSource -Expected "-Method 'put'" -Case 'Connector helper method'
+Assert-Contains `
+    -Source $configureSource `
+    -Expected 'if ($knowledgeGraphPlan.RequiresPatch)' `
+    -Case 'Knowledge graph PATCH decision'
+Assert-Contains `
+    -Source $configureSource `
+    -Expected 'Reusing existing exact SRE Agent knowledge graph configuration.' `
+    -Case 'Exact knowledge graph reuse'
+Assert-Contains `
+    -Source $configureSource `
+    -Expected 'if ($null -eq $existingConnector)' `
+    -Case 'Missing connector PUT decision'
+Assert-Contains `
+    -Source $configureSource `
+    -Expected "Reusing existing exact-scope connector '`$connectorName'." `
+    -Case 'Exact connector reuse'
+$initialAgentWaitIndex = $configureSource.IndexOf(
+    '$agent = Wait-ArcIdentitySreAgentProvisioningSucceeded',
+    [StringComparison]::Ordinal
+)
+$knowledgeGraphPatchIndex = $configureSource.IndexOf(
+    '$knowledgeGraphPatch = $null',
+    [StringComparison]::Ordinal
+)
+$knowledgeGraphMutationIndex = $configureSource.IndexOf(
+    "-FailureMessage 'Unable to add the ArcBox resource group to SRE Agent managed resources.'",
+    [StringComparison]::Ordinal
+)
+$postKnowledgeGraphWaitIndex = $configureSource.IndexOf(
+    '$agentAfterKnowledgeGraphPatch = Wait-ArcIdentitySreAgentProvisioningSucceeded',
+    [StringComparison]::Ordinal
+)
+$connectorMutationIndex = $configureSource.IndexOf(
+    "-FailureMessage 'Unable to configure the additive ArcBox Log Analytics connector.'",
+    [StringComparison]::Ordinal
+)
+$postConnectorWaitIndex = $configureSource.IndexOf(
+    '$agentAfterConnectorPut = Wait-ArcIdentitySreAgentProvisioningSucceeded',
+    [StringComparison]::Ordinal
+)
+$applyDataPlaneBoundaryIndex = $configureSource.IndexOf(
+    'Assert-ArcIdentitySreExtensionResourceCollisions `',
+    $postConnectorWaitIndex,
+    [StringComparison]::Ordinal
+)
+Assert-True `
+    -Condition (
+        $initialAgentWaitIndex -ge 0 -and
+        $initialAgentWaitIndex -lt $knowledgeGraphPatchIndex
+    ) `
+    -Case 'Pre-existing agent operation wait precedes mutation decisions'
+Assert-True `
+    -Condition (
+        $knowledgeGraphMutationIndex -lt $postKnowledgeGraphWaitIndex -and
+        $postKnowledgeGraphWaitIndex -lt $connectorMutationIndex
+    ) `
+    -Case 'Knowledge graph PATCH wait precedes connector PUT'
+Assert-True `
+    -Condition (
+        $connectorMutationIndex -lt $postConnectorWaitIndex -and
+        $postConnectorWaitIndex -lt $applyDataPlaneBoundaryIndex
+    ) `
+    -Case 'Connector PUT wait precedes SRE data-plane boundary'
+Assert-True `
+    -Condition (
+        [regex]::Matches(
+            $configureSource,
+            '(?m)^\s*Ensure-ArcIdentityRoleAssignment\s+`'
+        ).Count -eq 3
+    ) `
+    -Case 'Exactly three intended read-only role assignments'
 Assert-NotMatches `
     -Source $configureSource `
     -Pattern '(?m)^\s*[''"]?--body[''"]?\s*[, ]' `
@@ -974,6 +1224,14 @@ Assert-Contains `
     -Source $commonSource `
     -Expected 'Remove-Item -LiteralPath $bodyFile -Force' `
     -Case 'ARM body file cleanup'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected '[int] $TimeoutSeconds = 600' `
+    -Case 'SRE Agent wait ten-minute default timeout'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected '[int] $PollIntervalSeconds = 10' `
+    -Case 'SRE Agent wait default poll interval'
 Assert-NotMatches `
     -Source $commonSource `
     -Pattern '(?i)Write-(?:Host|Output|Verbose|Debug|Information|Warning)[^\r\n]*(?:bodyJson|\$Body)' `
