@@ -102,6 +102,69 @@ function Invoke-ArcIdentityAzNoOutput {
     }
 }
 
+function Invoke-ArcIdentityArmRestWithJsonBody {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Method,
+        [Parameter(Mandatory)]
+        [string] $Url,
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [object] $Body,
+        [string[]] $Headers = @('Content-Type=application/json'),
+        [string] $Output = 'none',
+        [ValidateRange(1, 100)]
+        [int] $JsonDepth = 100,
+        [Parameter(Mandatory)]
+        [string] $FailureMessage
+    )
+
+    if ($Body -is [string]) {
+        $bodyJson = [string] $Body
+        if (-not (Test-Json -Json $bodyJson -ErrorAction SilentlyContinue)) {
+            throw 'The ARM REST request body must be valid JSON.'
+        }
+    } else {
+        $bodyJson = ConvertTo-Json -InputObject $Body -Depth $JsonDepth -Compress
+    }
+
+    $bodyFile = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine(
+            [System.IO.Path]::GetTempPath(),
+            "arc-identity-arm-rest-$([Guid]::NewGuid().ToString('N')).json"
+        )
+    )
+    try {
+        [System.IO.File]::WriteAllText(
+            $bodyFile,
+            $bodyJson,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $bodyFileArgument = "@$bodyFile"
+        $azArguments = @(
+            'rest',
+            '--method', $Method,
+            '--url', $Url
+        )
+        if ($Headers.Count -gt 0) {
+            $azArguments += '--headers'
+            $azArguments += $Headers
+        }
+        $azArguments += @(
+            '--body', $bodyFileArgument,
+            '--output', $Output
+        )
+        Invoke-ArcIdentityAzNoOutput `
+            -Arguments $azArguments `
+            -FailureMessage $FailureMessage
+    } finally {
+        $bodyJson = $null
+        if (Test-Path -LiteralPath $bodyFile -PathType Leaf) {
+            Remove-Item -LiteralPath $bodyFile -Force
+        }
+    }
+}
+
 function Assert-ArcIdentityAzureContext {
     param(
         [Parameter(Mandatory)]
