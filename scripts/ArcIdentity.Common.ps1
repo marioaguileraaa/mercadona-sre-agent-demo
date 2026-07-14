@@ -66,6 +66,66 @@ function Get-ArcIdentityResponseItems {
     return @($Response)
 }
 
+function Get-ArcIdentityKnowledgeGraphConfigurationPlan {
+    param(
+        [AllowNull()]
+        [object] $ExistingConfiguration,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ExpectedIdentity,
+        [Parameter(Mandatory)]
+        [ValidateCount(1, 100)]
+        [string[]] $RequiredManagedResources
+    )
+
+    $existingIdentity = [string] (
+        Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $ExistingConfiguration `
+            -PropertyName 'identity'
+    )
+    $existingManagedResources = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $ExistingConfiguration `
+        -PropertyName 'managedResources'
+    $existingResourceSet = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $desiredResourceSet = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $desiredManagedResources = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($managedResource in @($existingManagedResources)) {
+        $resourceId = [string] $managedResource
+        if ([string]::IsNullOrWhiteSpace($resourceId)) {
+            continue
+        }
+        $null = $existingResourceSet.Add($resourceId)
+        if ($desiredResourceSet.Add($resourceId)) {
+            $desiredManagedResources.Add($resourceId)
+        }
+    }
+    foreach ($requiredResource in $RequiredManagedResources) {
+        if ([string]::IsNullOrWhiteSpace($requiredResource)) {
+            throw 'Required SRE Agent managed resource IDs must be nonblank.'
+        }
+        if ($desiredResourceSet.Add($requiredResource)) {
+            $desiredManagedResources.Add($requiredResource)
+        }
+    }
+
+    $identityMatches = [string]::Equals(
+        $existingIdentity,
+        $ExpectedIdentity,
+        [StringComparison]::OrdinalIgnoreCase
+    )
+    $managedResourceSetsMatch = $existingResourceSet.SetEquals($desiredResourceSet)
+    return [pscustomobject]@{
+        RequiresPatch = -not ($identityMatches -and $managedResourceSetsMatch)
+        Identity = $ExpectedIdentity
+        ManagedResources = $desiredManagedResources.ToArray()
+    }
+}
+
 function Invoke-ArcIdentityAzJson {
     param(
         [Parameter(Mandatory)]
@@ -85,6 +145,96 @@ function Invoke-ArcIdentityAzJson {
         return $json | ConvertFrom-Json -Depth 100
     } catch {
         throw "$FailureMessage Azure CLI did not return valid JSON."
+    }
+}
+
+function Wait-ArcIdentitySreAgentProvisioningSucceeded {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $SubscriptionId,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $AgentResourceId,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ApiVersion,
+        [ValidateRange(0, 86400)]
+        [int] $TimeoutSeconds = 600,
+        [ValidateRange(0, 3600)]
+        [int] $PollIntervalSeconds = 10
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $terminalStates = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($terminalState in @('Failed', 'Canceled', 'Cancelled', 'Error')) {
+        $null = $terminalStates.Add($terminalState)
+    }
+
+    $lastObservedState = '<not observed>'
+    $isFirstCheck = $true
+    while ($true) {
+        if (-not $isFirstCheck -and
+            $stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            throw "Azure SRE Agent did not reach provisioning state 'Succeeded' within $TimeoutSeconds seconds. Last observed state: '$lastObservedState'."
+        }
+        $isFirstCheck = $false
+
+        $agent = Invoke-ArcIdentityAzJson `
+            -Arguments @(
+                'rest',
+                '--method', 'get',
+                '--subscription', $SubscriptionId,
+                '--url', "https://management.azure.com${AgentResourceId}?api-version=$ApiVersion",
+                '--output', 'json'
+            ) `
+            -FailureMessage 'Unable to read the Azure SRE Agent provisioning state.'
+        $properties = Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $agent `
+            -PropertyName 'properties'
+        $stateValue = Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $properties `
+            -PropertyName 'provisioningState'
+        if ($stateValue -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string] $stateValue)) {
+            $lastObservedState = if ($null -eq $stateValue) {
+                '<missing>'
+            } elseif ([string]::IsNullOrWhiteSpace([string] $stateValue)) {
+                '<blank>'
+            } else {
+                [string] $stateValue
+            }
+            throw "Azure SRE Agent provisioning state was missing or invalid. Last observed state: '$lastObservedState'."
+        }
+
+        $lastObservedState = ([string] $stateValue).Trim()
+        if ([string]::Equals(
+                $lastObservedState,
+                'Succeeded',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            return $agent
+        }
+        if ($terminalStates.Contains($lastObservedState)) {
+            throw "Azure SRE Agent provisioning reached terminal state '$lastObservedState'."
+        }
+        if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            throw "Azure SRE Agent did not reach provisioning state 'Succeeded' within $TimeoutSeconds seconds. Last observed state: '$lastObservedState'."
+        }
+
+        $remainingMilliseconds = [Math]::Max(
+            0,
+            ($TimeoutSeconds * 1000) - $stopwatch.Elapsed.TotalMilliseconds
+        )
+        $sleepMilliseconds = [int] [Math]::Min(
+            $PollIntervalSeconds * 1000,
+            $remainingMilliseconds
+        )
+        if ($sleepMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $sleepMilliseconds
+        }
     }
 }
 
