@@ -1,0 +1,14 @@
+// Optional: requires the existing Change Tracking and Inventory solution; this extension does not enable it.
+let TargetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25"
+]);
+ConfigurationChange
+| where TimeGenerated >= ago(7d)
+| extend ResourceId=tolower(tostring(column_ifexists("_ResourceId", ""))),
+    ChangeKind=tostring(column_ifexists("ChangeType", column_ifexists("ConfigChangeType", "Unknown"))),
+    ChangeCategory=tostring(column_ifexists("ChangeCategory", "Unknown"))
+| where set_has_element(TargetResourceIds, ResourceId)
+| summarize Changes=count(), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated)
+    by Machine=tostring(split(ResourceId, "/")[-1]), ChangeCategory, ChangeKind, bin(TimeGenerated, 1h)
+| order by TimeGenerated desc, Machine asc

@@ -1,0 +1,14 @@
+let TargetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25"
+]);
+Event
+| where TimeGenerated >= ago(24h)
+| where set_has_element(TargetResourceIds, tolower(_ResourceId))
+| where EventLog == "Application"
+| where Source == "Mercadona.IdentityOps" and EventID in (4101, 4102)
+| where RenderedDescription contains '"demoSynthetic":true'
+| extend EventType=iff(EventID == 4101, "SyntheticTokenFailure", "SyntheticRecovery")
+| summarize Events=count(), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated)
+    by Machine=tostring(split(tolower(_ResourceId), "/")[-1]), EventType, bin(TimeGenerated, 5m)
+| order by TimeGenerated desc, Machine asc

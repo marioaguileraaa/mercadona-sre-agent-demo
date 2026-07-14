@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "arcResourceGroupName": {
+      "value": "rg-arcbox-itpro-weu-002"
+    },
+    "location": {
+      "value": "westeurope"
+    },
+    "workspaceResourceId": {
+      "value": "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourceGroups/rg-arcbox-itpro-weu-002/providers/Microsoft.OperationalInsights/workspaces/law-arcbox-demo-001"
+    },
+    "actionGroupResourceId": {
+      "value": "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourceGroups/rg-mercadona-sre-agent-v1/providers/Microsoft.Insights/actionGroups/ag-mercadona-sre-demo"
+    },
+    "targetMachineNames": {
+      "value": [
+        "ArcBox-Win2K22",
+        "ArcBox-Win2K25"
+      ]
+    },
+    "dataCollectionRuleName": {
+      "value": "dcr-arcbox-identity-ops"
+    },
+    "dataCollectionRuleAssociationName": {
+      "value": "assoc-arcbox-identity-ops"
+    },
+    "tokenFailureAlertName": {
+      "value": "alert-arcbox-identity-token-failure-burst"
+    },
+    "dataFreshnessAlertName": {
+      "value": "alert-arcbox-identity-data-freshness"
+    }
+  }
+}

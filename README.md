@@ -155,6 +155,23 @@ az monitor metrics list --resource $id --metric WorkingSetBytes --aggregation Ma
 
 Detailed response procedures are in [`docs/runbooks/cart-memory-pressure.md`](docs/runbooks/cart-memory-pressure.md). The guided Spanish walkthrough is [`docs/guia-demo-paso-a-paso.md`](docs/guia-demo-paso-a-paso.md).
 
+## Additive Azure Arc identity POC
+
+An isolated extension models an ADFS/domain-controller observability scenario on the existing ArcBox lab. Azure Arc, AMA, DCR, Log Analytics, alerts, and SRE Agent plumbing are real; `Mercadona.IdentityOps` events are explicitly synthetic (`demoSynthetic=true`) because the lab hosts do not run AD FS or AD DS. The extension does not change the retail UI/API or replace existing ArcBox DCR associations.
+
+Planning is the default and performs no deployment:
+
+```powershell
+.\scripts\deploy-arc-identity.ps1
+.\scripts\configure-arc-identity-sre-agent.ps1
+```
+
+The Spanish architecture, production mapping, exact approved command sequence, daily ArcBox dependency, demo flow, rollback, governance, and cost controls are documented in:
+
+- [`docs/arquitectura-identidad-arc.md`](docs/arquitectura-identidad-arc.md);
+- [`docs/runbooks/arc-identidad-operaciones.md`](docs/runbooks/arc-identidad-operaciones.md);
+- [`docs/guia-demo-identidad-arc.md`](docs/guia-demo-identidad-arc.md).
+
 ## Local validation
 
 ```powershell
@@ -173,7 +190,10 @@ az bicep build --file .\infra\main.bicep
 az bicep lint --file .\infra\main.bicep
 az bicep build --file .\infra\trigger-bridge.bicep
 az bicep lint --file .\infra\trigger-bridge.bicep
+az bicep build --file .\infra\arc-identity.bicep
+az bicep lint --file .\infra\arc-identity.bicep
 pwsh -NoProfile -File .\scripts\test-configure-sre-agent-contract.ps1
+pwsh -NoProfile -File .\scripts\test-arc-identity-contract.ps1
 ```
 
 ## Cost, cleanup, and reset
