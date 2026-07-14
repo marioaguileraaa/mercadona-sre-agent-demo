@@ -11,6 +11,7 @@ param(
     [string[]] $MachineNames = @('ArcBox-Win2K22', 'ArcBox-Win2K25'),
     [string] $DataCollectionRuleName = 'dcr-arcbox-identity-ops',
     [string] $AssociationName = 'assoc-arcbox-identity-ops',
+    [string] $ExistingVmInsightsDataCollectionRuleName = 'MSVMI-ama-vmi-default-dcr',
     [string] $TokenFailureAlertName = 'alert-arcbox-identity-token-failure-burst',
     [string] $DataFreshnessAlertName = 'alert-arcbox-identity-data-freshness',
     [switch] $Apply
@@ -160,6 +161,25 @@ foreach ($machine in $allMachines) {
         }
     )
     if ($machineName -in $MachineNames) {
+        $vmInsightsAssociations = @(
+            $associations | Where-Object {
+                $associationProperties = Get-ArcIdentityOptionalPropertyValue `
+                    -InputObject $_ `
+                    -PropertyName 'properties'
+                $associatedDcrId = [string] (
+                    Get-ArcIdentityOptionalPropertyValue `
+                        -InputObject $associationProperties `
+                        -PropertyName 'dataCollectionRuleId'
+                )
+                $associatedDcrId.EndsWith(
+                    "/$ExistingVmInsightsDataCollectionRuleName",
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+        )
+        if ($vmInsightsAssociations.Count -ne 1) {
+            throw "Target '$machineName' must retain exactly one association to existing VM Insights DCR '$ExistingVmInsightsDataCollectionRuleName'."
+        }
         foreach ($association in $dedicatedAssociations) {
             if ($association.name -ne $AssociationName -or
                 -not [string]::Equals(

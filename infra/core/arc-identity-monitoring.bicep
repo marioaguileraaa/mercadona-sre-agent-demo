@@ -58,7 +58,7 @@ let ExpectedSignals =
   ExpectedResources
   | extend JoinKey=1
   | join kind=inner (
-      datatable(Signal:string) ["Heartbeat", "Perf"]
+      datatable(Signal:string) ["Heartbeat", "InsightsMetrics"]
       | extend JoinKey=1
     ) on JoinKey
   | project ResourceId, Signal;
@@ -68,10 +68,11 @@ let LatestSignals =
       | where TimeGenerated >= ago(20m)
       | where set_has_element(TargetResourceIds, tolower(_ResourceId))
       | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="Heartbeat"),
-    (Perf
+    (InsightsMetrics
       | where TimeGenerated >= ago(20m)
       | where set_has_element(TargetResourceIds, tolower(_ResourceId))
-      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="Perf")
+      | where Namespace == "Processor" and Name == "UtilizationPercentage"
+      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="InsightsMetrics")
   | summarize LastSeen=max(TimeGenerated) by ResourceId, Signal;
 ExpectedSignals
 | join kind=leftouter LatestSignals on ResourceId, Signal
@@ -92,7 +93,7 @@ resource identityOpsDcr 'Microsoft.Insights/dataCollectionRules@2024-03-11' = {
   kind: 'Windows'
   tags: tags
   properties: {
-    description: 'Additive Arc identity-operations telemetry. Real host signals plus explicitly synthetic identity events.'
+    description: 'Additive events-only Arc identity telemetry. Performance remains in the existing VM Insights DCR and InsightsMetrics.'
     dataSources: {
       windowsEventLogs: [
         {
@@ -104,23 +105,6 @@ resource identityOpsDcr 'Microsoft.Insights/dataCollectionRules@2024-03-11' = {
             'Application!*[System[Provider[@Name=\'Mercadona.IdentityOps\'] and (EventID=4101 or EventID=4102)]]'
             'System!*[System[(Level=1 or Level=2 or Level=3)]]'
             'Application!*[System[(Level=1 or Level=2 or Level=3) and Provider[@Name!=\'Mercadona.IdentityOps\']]]'
-          ]
-        }
-      ]
-      performanceCounters: [
-        {
-          name: 'identityOpsHostPerformance'
-          streams: [
-            'Microsoft-Perf'
-          ]
-          samplingFrequencyInSeconds: 60
-          counterSpecifiers: [
-            '\\Processor(_Total)\\% Processor Time'
-            '\\Memory\\Available MBytes'
-            '\\LogicalDisk(_Total)\\Avg. Disk sec/Read'
-            '\\LogicalDisk(_Total)\\Avg. Disk sec/Write'
-            '\\LogicalDisk(_Total)\\% Free Space'
-            '\\Network Interface(*)\\Bytes Total/sec'
           ]
         }
       ]
@@ -137,14 +121,6 @@ resource identityOpsDcr 'Microsoft.Insights/dataCollectionRules@2024-03-11' = {
       {
         streams: [
           'Microsoft-Event'
-        ]
-        destinations: [
-          logAnalyticsDestinationName
-        ]
-      }
-      {
-        streams: [
-          'Microsoft-Perf'
         ]
         destinations: [
           logAnalyticsDestinationName
@@ -224,7 +200,7 @@ resource dataFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' 
   tags: tags
   properties: {
     displayName: 'ArcBox IdentityOps heartbeat or data freshness loss'
-    description: 'Sev2 alert when Heartbeat or the dedicated 60-second Perf stream is stale during the expected ArcBox operating window: 08:20 Europe/Madrid through 18:00 UTC.'
+    description: 'Sev2 alert when Heartbeat or existing VM Insights data in InsightsMetrics is stale during the expected ArcBox operating window: 08:20 Europe/Madrid through 18:00 UTC.'
     severity: 2
     enabled: true
     evaluationFrequency: 'PT5M'

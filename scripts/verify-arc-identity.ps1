@@ -13,6 +13,7 @@ param(
     [string[]] $MachineNames = @('ArcBox-Win2K22', 'ArcBox-Win2K25'),
     [string] $DataCollectionRuleName = 'dcr-arcbox-identity-ops',
     [string] $AssociationName = 'assoc-arcbox-identity-ops',
+    [string] $ExistingVmInsightsDataCollectionRuleName = 'MSVMI-ama-vmi-default-dcr',
     [string] $TokenFailureAlertName = 'alert-arcbox-identity-token-failure-burst',
     [string] $DataFreshnessAlertName = 'alert-arcbox-identity-data-freshness',
     [ValidateRange(5, 60)]
@@ -83,8 +84,8 @@ $windowsEventLogs = @(
 $performanceCounters = @(
     Get-ArcIdentityOptionalPropertyValue -InputObject $dcrDataSources -PropertyName 'performanceCounters'
 )
-if ($windowsEventLogs.Count -ne 1 -or $performanceCounters.Count -ne 1) {
-    throw 'The dedicated DCR must contain exactly one Windows event source and one performance-counter source.'
+if ($windowsEventLogs.Count -ne 1 -or $performanceCounters.Count -ne 0) {
+    throw 'The dedicated DCR must contain exactly one Windows event source and no duplicate performance-counter source.'
 }
 $xPathQueries = @($windowsEventLogs[0].xPathQueries)
 foreach ($requiredXPathFragment in @(
@@ -102,22 +103,16 @@ if ($xPathQueries | Where-Object { $_ -match '^(?i)Security!' }) {
     throw 'The synthetic identity DCR must not collect the broad Windows Security log.'
 }
 
-$requiredCounters = @(
-    '\Processor(_Total)\% Processor Time',
-    '\Memory\Available MBytes',
-    '\LogicalDisk(_Total)\Avg. Disk sec/Read',
-    '\LogicalDisk(_Total)\Avg. Disk sec/Write',
-    '\LogicalDisk(_Total)\% Free Space',
-    '\Network Interface(*)\Bytes Total/sec'
+$dcrDataFlows = @(
+    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrProperties -PropertyName 'dataFlows'
 )
-$configuredCounters = @($performanceCounters[0].counterSpecifiers)
-foreach ($requiredCounter in $requiredCounters) {
-    if ($requiredCounter -notin $configuredCounters) {
-        throw "The dedicated DCR is missing performance counter '$requiredCounter'."
-    }
-}
-if ([int] $performanceCounters[0].samplingFrequencyInSeconds -ne 60) {
-    throw 'The dedicated performance counters must retain the 60-second sampling interval.'
+$eventStreams = @(
+    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrDataFlows[0] -PropertyName 'streams'
+)
+if ($dcrDataFlows.Count -ne 1 -or
+    $eventStreams.Count -ne 1 -or
+    $eventStreams[0] -ne 'Microsoft-Event') {
+    throw 'The dedicated DCR must route only Microsoft-Event; performance remains in the existing VM Insights DCR.'
 }
 
 $destinations = Get-ArcIdentityOptionalPropertyValue -InputObject $dcrProperties -PropertyName 'destinations'
@@ -164,6 +159,25 @@ foreach ($machine in $allMachines) {
     )
 
     if ($machineName -in $MachineNames) {
+        $vmInsightsAssociations = @(
+            $associations | Where-Object {
+                $associationProperties = Get-ArcIdentityOptionalPropertyValue `
+                    -InputObject $_ `
+                    -PropertyName 'properties'
+                $associatedDcrId = [string] (
+                    Get-ArcIdentityOptionalPropertyValue `
+                        -InputObject $associationProperties `
+                        -PropertyName 'dataCollectionRuleId'
+                )
+                $associatedDcrId.EndsWith(
+                    "/$ExistingVmInsightsDataCollectionRuleName",
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+        )
+        if ($vmInsightsAssociations.Count -ne 1) {
+            throw "Target '$machineName' does not retain exactly one association to existing VM Insights DCR '$ExistingVmInsightsDataCollectionRuleName'."
+        }
         if ($dedicatedAssociations.Count -ne 1 -or
             $dedicatedAssociations[0].name -ne $AssociationName -or
             -not [string]::Equals(
@@ -206,19 +220,20 @@ let LatestHeartbeat =
   | where TimeGenerated >= ago(${freshnessLookbackMinutes}m)
   | where set_has_element(TargetResourceIds, tolower(_ResourceId))
   | summarize LastHeartbeat=max(TimeGenerated) by ResourceId=tolower(_ResourceId);
-let LatestPerf =
-  Perf
+let LatestInsightsMetrics =
+  InsightsMetrics
   | where TimeGenerated >= ago(${freshnessLookbackMinutes}m)
   | where set_has_element(TargetResourceIds, tolower(_ResourceId))
-  | summarize LastPerf=max(TimeGenerated) by ResourceId=tolower(_ResourceId);
+  | where Namespace == "Processor" and Name == "UtilizationPercentage"
+  | summarize LastInsightsMetrics=max(TimeGenerated) by ResourceId=tolower(_ResourceId);
 Expected
 | join kind=leftouter LatestHeartbeat on ResourceId
-| join kind=leftouter LatestPerf on ResourceId
+| join kind=leftouter LatestInsightsMetrics on ResourceId
 | project ResourceId,
     HeartbeatFresh=isnotnull(LastHeartbeat) and LastHeartbeat >= ago(${MaximumIngestionAgeMinutes}m),
-    PerfFresh=isnotnull(LastPerf) and LastPerf >= ago(${MaximumIngestionAgeMinutes}m),
+    InsightsMetricsFresh=isnotnull(LastInsightsMetrics) and LastInsightsMetrics >= ago(${MaximumIngestionAgeMinutes}m),
     LastHeartbeat,
-    LastPerf
+    LastInsightsMetrics
 "@
 $ingestionDeadline = (Get-Date).AddSeconds($IngestionTimeoutSeconds)
 $freshnessRows = @()
@@ -233,7 +248,7 @@ do {
     )
     $allFresh = $freshnessRows.Count -eq 2 -and
         @($freshnessRows | Where-Object {
-                $_.HeartbeatFresh -ne $true -or $_.PerfFresh -ne $true
+                $_.HeartbeatFresh -ne $true -or $_.InsightsMetricsFresh -ne $true
             }).Count -eq 0
     if ($allFresh) {
         break
@@ -241,7 +256,7 @@ do {
     Start-Sleep -Seconds 30
 } while ((Get-Date) -lt $ingestionDeadline)
 if (-not $allFresh) {
-    throw "Heartbeat and Perf ingestion did not become fresh for both target machines within $IngestionTimeoutSeconds seconds."
+    throw "Heartbeat and existing InsightsMetrics ingestion did not become fresh for both target machines within $IngestionTimeoutSeconds seconds."
 }
 
 function Assert-ArcIdentityAlertRule {
@@ -344,7 +359,7 @@ Assert-ArcIdentityAlertRule `
     -ExpectedOverrideQueryTimeRange $null
 Assert-ArcIdentityAlertRule `
     -AlertName $DataFreshnessAlertName `
-    -RequiredQueryFragments @('Heartbeat', 'Perf', 'ago(10m)', 'project ResourceId, Signal', 'datetime_utc_to_local(CurrentUtc, "Europe/Madrid")', 'MadridMinuteOfDay >= 500', 'datetime_part("Hour", CurrentUtc) < 18') `
+    -RequiredQueryFragments @('Heartbeat', 'InsightsMetrics', 'UtilizationPercentage', 'ago(10m)', 'project ResourceId, Signal', 'datetime_utc_to_local(CurrentUtc, "Europe/Madrid")', 'MadridMinuteOfDay >= 500', 'datetime_part("Hour", CurrentUtc) < 18') `
     -ExpectedActionGroupResourceId $actionGroupResourceId `
     -ExpectedThreshold 1 `
     -ExpectedEvaluationFrequency 'PT5M' `

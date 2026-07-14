@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.42.1.51946",
-      "templateHash": "12874739261322750457"
+      "templateHash": "15786812930904591506"
     }
   },
   "parameters": {
@@ -134,7 +134,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.42.1.51946",
-              "templateHash": "8444711414664425819"
+              "templateHash": "12512510924331600263"
             }
           },
           "parameters": {
@@ -206,7 +206,7 @@
             "logAnalyticsDestinationName": "arcboxIdentityOpsLaw",
             "targetMachineResourceIdsJson": "[string(variables('targetMachineResourceIds'))]",
             "tokenFailureQuery": "[format('let TargetResourceIds = dynamic({0});\r\nEvent\r\n| where TimeGenerated >= ago(5m)\r\n| where set_has_element(TargetResourceIds, tolower(_ResourceId))\r\n| where EventLog == \"Application\"\r\n| where Source == \"Mercadona.IdentityOps\" and EventID == 4101\r\n| where RenderedDescription contains ''\"demoSynthetic\":true''\r\n| project TimeGenerated, _ResourceId\r\n', variables('targetMachineResourceIdsJson'))]",
-            "dataFreshnessQuery": "[format('let TargetResourceIds = dynamic({0});\r\nlet CurrentUtc = now();\r\nlet CurrentMadrid = datetime_utc_to_local(CurrentUtc, \"Europe/Madrid\");\r\nlet MadridMinuteOfDay = datetime_part(\"Hour\", CurrentMadrid) * 60 + datetime_part(\"Minute\", CurrentMadrid);\r\nlet IsExpectedOperatingWindow = MadridMinuteOfDay >= 500 and datetime_part(\"Hour\", CurrentUtc) < 18;\r\nlet ExpectedResources =\r\n  print ResourceIds=TargetResourceIds\r\n  | mv-expand ResourceId=ResourceIds to typeof(string)\r\n  | project ResourceId=tolower(ResourceId);\r\nlet ExpectedSignals =\r\n  ExpectedResources\r\n  | extend JoinKey=1\r\n  | join kind=inner (\r\n      datatable(Signal:string) [\"Heartbeat\", \"Perf\"]\r\n      | extend JoinKey=1\r\n    ) on JoinKey\r\n  | project ResourceId, Signal;\r\nlet LatestSignals =\r\n  union\r\n    (Heartbeat\r\n      | where TimeGenerated >= ago(20m)\r\n      | where set_has_element(TargetResourceIds, tolower(_ResourceId))\r\n      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal=\"Heartbeat\"),\r\n    (Perf\r\n      | where TimeGenerated >= ago(20m)\r\n      | where set_has_element(TargetResourceIds, tolower(_ResourceId))\r\n      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal=\"Perf\")\r\n  | summarize LastSeen=max(TimeGenerated) by ResourceId, Signal;\r\nExpectedSignals\r\n| join kind=leftouter LatestSignals on ResourceId, Signal\r\n| where IsExpectedOperatingWindow\r\n| where isnull(LastSeen) or LastSeen < ago(10m)\r\n| project ResourceId, Signal\r\n', variables('targetMachineResourceIdsJson'))]"
+            "dataFreshnessQuery": "[format('let TargetResourceIds = dynamic({0});\r\nlet CurrentUtc = now();\r\nlet CurrentMadrid = datetime_utc_to_local(CurrentUtc, \"Europe/Madrid\");\r\nlet MadridMinuteOfDay = datetime_part(\"Hour\", CurrentMadrid) * 60 + datetime_part(\"Minute\", CurrentMadrid);\r\nlet IsExpectedOperatingWindow = MadridMinuteOfDay >= 500 and datetime_part(\"Hour\", CurrentUtc) < 18;\r\nlet ExpectedResources =\r\n  print ResourceIds=TargetResourceIds\r\n  | mv-expand ResourceId=ResourceIds to typeof(string)\r\n  | project ResourceId=tolower(ResourceId);\r\nlet ExpectedSignals =\r\n  ExpectedResources\r\n  | extend JoinKey=1\r\n  | join kind=inner (\r\n      datatable(Signal:string) [\"Heartbeat\", \"InsightsMetrics\"]\r\n      | extend JoinKey=1\r\n    ) on JoinKey\r\n  | project ResourceId, Signal;\r\nlet LatestSignals =\r\n  union\r\n    (Heartbeat\r\n      | where TimeGenerated >= ago(20m)\r\n      | where set_has_element(TargetResourceIds, tolower(_ResourceId))\r\n      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal=\"Heartbeat\"),\r\n    (InsightsMetrics\r\n      | where TimeGenerated >= ago(20m)\r\n      | where set_has_element(TargetResourceIds, tolower(_ResourceId))\r\n      | where Namespace == \"Processor\" and Name == \"UtilizationPercentage\"\r\n      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal=\"InsightsMetrics\")\r\n  | summarize LastSeen=max(TimeGenerated) by ResourceId, Signal;\r\nExpectedSignals\r\n| join kind=leftouter LatestSignals on ResourceId, Signal\r\n| where IsExpectedOperatingWindow\r\n| where isnull(LastSeen) or LastSeen < ago(10m)\r\n| project ResourceId, Signal\r\n', variables('targetMachineResourceIdsJson'))]"
           },
           "resources": [
             {
@@ -217,7 +217,7 @@
               "kind": "Windows",
               "tags": "[parameters('tags')]",
               "properties": {
-                "description": "Additive Arc identity-operations telemetry. Real host signals plus explicitly synthetic identity events.",
+                "description": "Additive events-only Arc identity telemetry. Performance remains in the existing VM Insights DCR and InsightsMetrics.",
                 "dataSources": {
                   "windowsEventLogs": [
                     {
@@ -229,23 +229,6 @@
                         "Application!*[System[Provider[@Name='Mercadona.IdentityOps'] and (EventID=4101 or EventID=4102)]]",
                         "System!*[System[(Level=1 or Level=2 or Level=3)]]",
                         "Application!*[System[(Level=1 or Level=2 or Level=3) and Provider[@Name!='Mercadona.IdentityOps']]]"
-                      ]
-                    }
-                  ],
-                  "performanceCounters": [
-                    {
-                      "name": "identityOpsHostPerformance",
-                      "streams": [
-                        "Microsoft-Perf"
-                      ],
-                      "samplingFrequencyInSeconds": 60,
-                      "counterSpecifiers": [
-                        "\\Processor(_Total)\\% Processor Time",
-                        "\\Memory\\Available MBytes",
-                        "\\LogicalDisk(_Total)\\Avg. Disk sec/Read",
-                        "\\LogicalDisk(_Total)\\Avg. Disk sec/Write",
-                        "\\LogicalDisk(_Total)\\% Free Space",
-                        "\\Network Interface(*)\\Bytes Total/sec"
                       ]
                     }
                   ]
@@ -262,14 +245,6 @@
                   {
                     "streams": [
                       "Microsoft-Event"
-                    ],
-                    "destinations": [
-                      "[variables('logAnalyticsDestinationName')]"
-                    ]
-                  },
-                  {
-                    "streams": [
-                      "Microsoft-Perf"
                     ],
                     "destinations": [
                       "[variables('logAnalyticsDestinationName')]"
@@ -357,7 +332,7 @@
               "tags": "[parameters('tags')]",
               "properties": {
                 "displayName": "ArcBox IdentityOps heartbeat or data freshness loss",
-                "description": "Sev2 alert when Heartbeat or the dedicated 60-second Perf stream is stale during the expected ArcBox operating window: 08:20 Europe/Madrid through 18:00 UTC.",
+                "description": "Sev2 alert when Heartbeat or existing VM Insights data in InsightsMetrics is stale during the expected ArcBox operating window: 08:20 Europe/Madrid through 18:00 UTC.",
                 "severity": 2,
                 "enabled": true,
                 "evaluationFrequency": "PT5M",

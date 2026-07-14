@@ -17,7 +17,7 @@ Los hosts del laboratorio no ejecutan AD DS ni AD FS. Ningún evento `Mercadona.
 | Componente o señal | Naturaleza | Límite |
 |---|---|---|
 | `ArcBox-Win2K22` y `ArcBox-Win2K25` conectados a Azure Arc | Real del laboratorio | No son DC ni servidores AD FS |
-| `AzureMonitorWindowsAgent`, asociaciones DCR, `Heartbeat` y `Perf` | Real del laboratorio | Solo estado y rendimiento genérico del host |
+| `AzureMonitorWindowsAgent`, asociaciones DCR, `Heartbeat` e `InsightsMetrics` | Real del laboratorio | Solo estado y rendimiento genérico del host |
 | Eventos System/Application de nivel Critical, Error y Warning | Real del host | No se interpretan automáticamente como incidentes de identidad |
 | Fuente Application `Mercadona.IdentityOps`, IDs 4101/4102 | Sintética | JSON con `demoSynthetic=true`; nunca se etiqueta como AD FS/DC genuino |
 | Alertas, acción de Azure Monitor y análisis de Azure SRE Agent | Plumbing real | El incidente que activa 4101 es sintético |
@@ -35,7 +35,7 @@ La auditoría previa del 14 de julio de 2026 confirmó:
 - ninguna fila todavía en `Event`, `SecurityEvent` o `Perf`;
 - la DCR existente de VM Insights entrega `InsightsMetrics` y debe conservarse.
 
-Esta extensión no crea automatización de arranque. Añade `Perf` y `Event` únicamente para los dos Windows objetivo después del despliegue de su DCR dedicada. La ausencia de esas tablas antes del primer despliegue es la línea base esperada, no un fallo de ArcBox.
+Esta extensión no crea automatización de arranque ni contadores duplicados. La DCR dedicada añade únicamente `Event` para los dos Windows objetivo. `Perf` permanece vacío por diseño: CPU, memoria, disco y red ya llegan a `InsightsMetrics` mediante `MSVMI-ama-vmi-default-dcr`, que conserva sus asociaciones.
 
 La ventana auditada de dos horas aporta esta referencia informativa para correlación:
 
@@ -44,7 +44,7 @@ La ventana auditada de dos horas aporta esta referencia informativa para correla
 | `ArcBox-Win2K22` | 4,38 % / 11,51 % | ~2,53 GB | ~1 ms | 80,31 % |
 | `ArcBox-Win2K25` | 9,71 % / 19,32 % | ~2,19 GB | ~1,1-1,3 ms | 58,73 % |
 
-Estos valores no son umbrales de alerta ni SLO. En este primer POC, CPU, memoria, disco y red se usan solo para correlación e informes. No existe una alerta Sev2 por valor de rendimiento: la regla cuantitativa determinista es la ráfaga sintética acotada; la otra Sev2 detecta ausencia de Heartbeat/Perf durante la ventana operativa, no degradación de sus valores.
+Estos valores no son umbrales de alerta ni SLO. En este primer POC, CPU, memoria, disco y red se usan solo para correlación e informes. No existe una alerta Sev2 por valor de rendimiento: la regla cuantitativa determinista es la ráfaga sintética acotada; la otra Sev2 detecta ausencia de Heartbeat/InsightsMetrics durante la ventana operativa, no degradación de sus valores.
 
 ## Flujo
 
@@ -53,21 +53,25 @@ flowchart LR
   Host1[ArcBox-Win2K22]
   Host2[ArcBox-Win2K25]
   AMA[AMA real]
-  DCR[DCR aditiva identity ops]
+  IdentityDCR[DCR identity ops<br/>solo Event]
+  VmiDCR[MSVMI-ama-vmi-default-dcr<br/>existente]
   LAW[law-arcbox-demo-001]
   Alerts[2 alertas Sev2]
-  AG[ag-mercadona-sre-demo]
+  AG[ag-mercadona-sre-demo<br/>0 receptores]
   Agent[sre-agent-mercadona-v1<br/>Review / Low]
   Report[Informe laborable agregado]
   SOC[SOC / Microsoft Sentinel]
 
   Host1 --> AMA
   Host2 --> AMA
-  AMA --> DCR
-  DCR -->|Heartbeat, Perf, Event| LAW
+  AMA --> IdentityDCR
+  AMA --> VmiDCR
+  IdentityDCR -->|Event| LAW
+  VmiDCR -->|InsightsMetrics| LAW
+  AMA -->|Heartbeat| LAW
   LAW --> Alerts
   Alerts --> AG
-  AG --> Agent
+  Alerts -. plataforma AzMonitor y filtro .-> Agent
   LAW --> Agent
   Agent --> Report
   Agent -. incidente de seguridad real .-> SOC
@@ -79,28 +83,25 @@ La orquestación [`infra/arc-identity.bicep`](../infra/arc-identity.bicep) se ej
 
 | Recurso | Nombre | Comportamiento |
 |---|---|---|
-| DCR Windows | `dcr-arcbox-identity-ops` | Nueva; no reemplaza la DCR de VM Insights |
+| DCR Windows | `dcr-arcbox-identity-ops` | Nueva, solo Event; no reemplaza ni duplica la DCR de VM Insights |
 | Asociación DCR | `assoc-arcbox-identity-ops` | Nueva y solo en los dos Windows objetivo |
 | Alerta de ráfaga | `alert-arcbox-identity-token-failure-burst` | Sev2, umbral 8 eventos/5 min, auto-resolve |
-| Alerta de frescura | `alert-arcbox-identity-data-freshness` | Sev2 si Heartbeat o Perf supera 10 min dentro de 08:20 Europe/Madrid-18:00 UTC, auto-resolve |
+| Alerta de frescura | `alert-arcbox-identity-data-freshness` | Sev2 si Heartbeat o InsightsMetrics supera 10 min dentro de 08:20 Europe/Madrid-18:00 UTC, auto-resolve |
 
-Las alertas reutilizan `ag-mercadona-sre-demo`. Actualmente el action group está habilitado y tiene cero receptores de forma intencionada; esta extensión solo referencia su ID y no añade notificaciones. No se crean receptores, identidades, workspaces, extensiones de máquina ni resource groups.
+Las alertas reutilizan `ag-mercadona-sre-demo`. Actualmente el action group está habilitado y tiene cero receptores de forma intencionada; esta extensión solo referencia su ID y no añade notificaciones. El action group **no** notifica al SRE Agent: el agente detecta las reglas mediante su plataforma de incidentes Azure Monitor y el filtro `identity-infrastructure-sev2`, igual que el patrón retail existente. No se crean receptores, identidades, workspaces, extensiones de máquina ni resource groups.
 
 Los `displayName` de las dos reglas empiezan por `ArcBox IdentityOps`. El filtro nuevo usa ese mismo prefijo para no solaparse con el filtro retail existente, que selecciona títulos con `mercadona` y puede delegar en un subagente con herramientas de escritura.
 
 ## Colección y control de volumen
 
-La DCR usa una frecuencia de 60 segundos y únicamente:
+La DCR aditiva recopila únicamente:
 
-- `\Processor(_Total)\% Processor Time`;
-- `\Memory\Available MBytes`;
-- latencia de lectura/escritura de `LogicalDisk(_Total)`;
-- `% Free Space`;
-- `\Network Interface(*)\Bytes Total/sec`;
 - `Mercadona.IdentityOps` 4101/4102;
 - Critical, Error y Warning de System/Application, excluyendo la fuente sintética de la consulta genérica.
 
-No se ingiere de forma amplia el canal Security. Los principales controles de coste son dos hosts, frecuencia de 60 segundos, XPath limitado, dos reglas de alerta y el volumen de consultas/unidades del SRE Agent. La extensión no cambia retención, compromiso, SKU ni configuración de `law-arcbox-demo-001`.
+El rendimiento reutiliza `InsightsMetrics` existente: `Processor/UtilizationPercentage`, `Memory/AvailableMB`, `LogicalDisk/ReadLatencyMs`, `WriteLatencyMs`, `FreeSpacePercentage`, y `Network/ReadBytesPerSecond`/`WriteBytesPerSecond`. No se añade `performanceCounters`, flujo `Microsoft-Perf` ni asociación que duplique las 174 000 filas observadas en 24 horas.
+
+No se ingiere de forma amplia el canal Security. Los principales controles de coste son la DCR solo de eventos, XPath limitado, dos reglas de alerta y el volumen de consultas/unidades del SRE Agent. La extensión no cambia retención, compromiso, SKU ni configuración de `law-arcbox-demo-001`.
 
 ## Configuración del Azure SRE Agent
 
@@ -128,7 +129,7 @@ La identidad ya puede tener permisos fuera de ArcBox por necesidades del escenar
 
 ## Ventana operativa, UTC y DST
 
-La Logic App inicia `ArcBox-Client` a las 08:00 de `Romance Standard Time`, equivalente a `Europe/Madrid`. La alerta de frescura usa la función KQL `datetime_utc_to_local(..., "Europe/Madrid")`, por lo que respeta automáticamente CET (UTC+1) y CEST (UTC+2), y comienza a evaluar a las 08:20 locales tras 20 minutos de gracia. Deja de devolver filas a las 18:00 UTC, cuando actúa `shutdown-computevm-ArcBox-Client`; esto equivale a las 19:00 CET o 20:00 CEST. La ausencia nocturna de Heartbeat/Perf es esperada y no genera alerta.
+La Logic App inicia `ArcBox-Client` a las 08:00 de `Romance Standard Time`, equivalente a `Europe/Madrid`. La alerta de frescura usa la función KQL `datetime_utc_to_local(..., "Europe/Madrid")`, por lo que respeta automáticamente CET (UTC+1) y CEST (UTC+2), y comienza a evaluar a las 08:20 locales tras 20 minutos de gracia. Deja de devolver filas a las 18:00 UTC, cuando actúa `shutdown-computevm-ArcBox-Client`; esto equivale a las 19:00 CET o 20:00 CEST. La ausencia nocturna de Heartbeat/InsightsMetrics es esperada y no genera alerta.
 
 El informe laborable usa cron UTC `30 7 * * 1-5`: se ejecuta a las 08:30 CET o 09:30 CEST, siempre después de la gracia de arranque y antes del autoapagado.
 

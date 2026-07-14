@@ -21,15 +21,15 @@ Los eventos 4101/4102 son sintéticos. No ejecutar los scripts contra otros recu
 1. iniciar la VM padre `ArcBox-Client` siguiendo el procedimiento de Jumpstart;
 2. esperar a que ambas máquinas aparezcan `Connected`;
 3. confirmar `AzureMonitorWindowsAgent` en `Succeeded`;
-4. esperar Heartbeat y Perf recientes antes de generar eventos.
+4. esperar Heartbeat e `InsightsMetrics` recientes antes de generar eventos.
 
 La automatización existente `la-start-arcbox-client` está habilitada y arranca diariamente la VM padre a las 08:00 (`Romance Standard Time`). Sus cinco ejecuciones auditadas más recientes terminaron correctamente. Los invitados usan Hyper-V `AutomaticStartAction=Start` y `AutomaticStopAction=ShutDown`. No crear otra automatización de arranque: verificar siempre el resultado real porque el horario no sustituye el preflight.
 
-El schedule DevTestLab `shutdown-computevm-ArcBox-Client` autoapaga la VM padre diariamente a las 18:00 UTC. La alerta de frescura solo evalúa desde las 08:20 `Europe/Madrid` hasta ese corte UTC. KQL aplica DST automáticamente: el inicio corresponde a 07:20 UTC en CET y 06:20 UTC en CEST; el fin corresponde a 19:00 CET y 20:00 CEST. No interpretar la ausencia nocturna de Heartbeat/Perf como avería.
+El schedule DevTestLab `shutdown-computevm-ArcBox-Client` autoapaga la VM padre diariamente a las 18:00 UTC. La alerta de frescura solo evalúa desde las 08:20 `Europe/Madrid` hasta ese corte UTC. KQL aplica DST automáticamente: el inicio corresponde a 07:20 UTC en CET y 06:20 UTC en CEST; el fin corresponde a 19:00 CET y 20:00 CEST. No interpretar la ausencia nocturna de Heartbeat/InsightsMetrics como avería.
 
 No iniciar la demo si la VM padre, una máquina anidada, AMA o LAW no están sanos.
 
-Antes del primer despliegue, la línea base esperada es Heartbeat e `InsightsMetrics` para los cinco invitados, Change Tracking en tres Windows y ninguna fila en `Event`, `SecurityEvent` o `Perf`. La DCR de VM Insights existente produce `InsightsMetrics`. El nuevo `Perf` y los eventos Application/System aparecen solo después de desplegar la DCR dedicada; por eso `verify-arc-identity.ps1` se ejecuta después del despliegue inicial.
+Antes del primer despliegue, la línea base esperada es Heartbeat e `InsightsMetrics` para los cinco invitados, Change Tracking en tres Windows y ninguna fila en `Event`, `SecurityEvent` o `Perf`. `Perf` debe seguir vacío: `MSVMI-ama-vmi-default-dcr` ya produce 174 000 filas/24 h en `InsightsMetrics`. La DCR dedicada añade solo eventos Application/System, y el preflight exige conservar exactamente una asociación VM Insights en cada host objetivo.
 
 Como referencia de dos horas, Win2K22 mostró CPU 4,38 % de media/11,51 % p95, ~2,53 GB disponibles, ~1 ms de latencia de disco y 80,31 % libre; Win2K25 mostró 9,71 %/19,32 %, ~2,19 GB, ~1,1-1,3 ms y 58,73 %. Usar estos datos solo para contexto del informe. No convertirlos en umbrales ni alertas de CPU, memoria, disco o espacio sin un baseline más largo y change control.
 
@@ -56,13 +56,13 @@ La verificación exige:
 - AMA correcto en los dos hosts;
 - una asociación dedicada por host y ninguna en otros hosts;
 - preservación visible de otras asociaciones;
-- Heartbeat y Perf recientes;
+- Heartbeat e `InsightsMetrics` recientes;
 - dos reglas habilitadas Sev2/auto-resolve con la acción existente;
 - RBAC exacto, conector LAW, subagente, skill, filtro y tarea;
 - agente todavía `Review/Low`.
 - tarea laborable a las 07:30 UTC, equivalente a 08:30 CET o 09:30 CEST y siempre posterior a la gracia de arranque.
 
-`ag-mercadona-sre-demo` está habilitado sin receptores de forma intencionada. La extensión reutiliza únicamente su ID, igual que el patrón de alerta existente, y no crea correo, SMS, webhook ni otro receptor. La investigación del SRE Agent se enruta por el filtro AzMonitor dedicado.
+`ag-mercadona-sre-demo` está habilitado sin receptores de forma intencionada. La extensión reutiliza únicamente su ID, igual que el patrón de alerta existente, y no crea correo, SMS, webhook ni otro receptor. No notifica al SRE Agent: la plataforma de incidentes Azure Monitor del agente detecta la regla y el filtro `identity-infrastructure-sev2` la enruta al subagente de solo lectura.
 
 ## Generar el incidente acotado
 
@@ -97,7 +97,7 @@ Resultado esperado:
 
 - 24 eventos 4101 para la ejecución por defecto;
 - alerta `alert-arcbox-identity-token-failure-burst` Sev2;
-- acción hacia `ag-mercadona-sre-demo`;
+- referencia de acción a `ag-mercadona-sre-demo`;
 - ningún aviso externo, porque el action group conserva cero receptores;
 - investigación por `identity-infrastructure-analyzer`;
 - explicación explícita de que Arc/AMA/LAW son reales y la fuente de identidad es sintética;
@@ -124,7 +124,7 @@ La regla debe auto-resolverse cuando la ventana de cinco minutos deje de contene
 
 1. Las asociaciones existentes siguen presentes.
 2. La DCR dedicada aparece solo en los dos Windows objetivo.
-3. Heartbeat y Perf tienen menos de 15 minutos.
+3. Heartbeat e `InsightsMetrics` tienen menos de 15 minutos.
 4. La ráfaga es exactamente la acotada y contiene `demoSynthetic=true`.
 5. El informe no afirma que los hosts ejecuten AD FS/DC.
 6. El filtro y la tarea permanecen Review; el agente permanece Review/Low.
@@ -139,7 +139,7 @@ La regla debe auto-resolverse cuando la ventana de cinco minutos deje de contene
 | VM padre apagada o Arc `Disconnected` | iniciar ArcBox según Jumpstart y esperar |
 | AMA no está `Succeeded` | investigar extensión existente; no reinstalarla desde estos scripts |
 | DCR/asociación del mismo nombre no pertenece a la demo | detener; no sobrescribir |
-| LAW no recibe Perf | revisar asociación, AMA y latencia; no ampliar Security |
+| LAW no recibe InsightsMetrics | revisar la asociación existente `MSVMI-ama-vmi-default-dcr` y AMA; no añadir contadores duplicados |
 | La ráfaga ya supera el límite | detener y usar un correlation ID nuevo solo tras revisar |
 | El agente sugiere remediación de identidad | rechazar; este POC solo investiga y recomienda |
 | Evidencia sin `demoSynthetic=true` sugiere ataque real | detener demo y escalar a SOC/Microsoft Sentinel |
@@ -159,4 +159,4 @@ No eliminar `rg-arcbox-itpro-weu-002`, máquinas, `AzureMonitorWindowsAgent`, `l
 
 ## Costes
 
-Los drivers son ingestión/retención de Log Analytics, seis contadores por minuto y host, eventos System/Application filtrados, evaluaciones de dos alertas y unidades/consultas de Azure SRE Agent. Monitorizar volumen tras el primer día y ajustar XPath/frecuencia con change control; no ampliar Security en este workspace.
+Los drivers incrementales son los eventos System/Application filtrados, evaluaciones de dos alertas y unidades/consultas de Azure SRE Agent. Los datos de rendimiento ya existen en `InsightsMetrics`; no duplicarlos en `Perf`. Monitorizar volumen tras el primer día y ajustar XPath con change control; no ampliar Security en este workspace.

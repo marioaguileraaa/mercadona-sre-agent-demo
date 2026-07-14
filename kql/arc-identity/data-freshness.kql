@@ -12,7 +12,7 @@ let Expected =
   | project ResourceId=tolower(ResourceId)
   | extend JoinKey=1
   | join kind=inner (
-      datatable(Signal:string) ["Heartbeat", "Perf"]
+      datatable(Signal:string) ["Heartbeat", "InsightsMetrics"]
       | extend JoinKey=1
     ) on JoinKey
   | project ResourceId, Signal;
@@ -21,9 +21,10 @@ let Latest =
     (Heartbeat
       | where TimeGenerated >= ago(24h)
       | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="Heartbeat"),
-    (Perf
+    (InsightsMetrics
       | where TimeGenerated >= ago(24h)
-      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="Perf")
+      | where Namespace == "Processor" and Name == "UtilizationPercentage"
+      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="InsightsMetrics")
   | where set_has_element(TargetResourceIds, ResourceId)
   | summarize LastSeen=max(TimeGenerated), Records=count() by ResourceId, Signal;
 Expected

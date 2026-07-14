@@ -2,20 +2,15 @@ let TargetResourceIds = dynamic([
   "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
   "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25"
 ]);
-let UsefulCounters = dynamic([
-  "% Processor Time",
-  "Available MBytes",
-  "Avg. Disk sec/Read",
-  "Avg. Disk sec/Write",
-  "% Free Space",
-  "Bytes Total/sec"
-]);
-Perf
+InsightsMetrics
 | where TimeGenerated >= ago(24h)
 | where set_has_element(TargetResourceIds, tolower(_ResourceId))
-| where set_has_element(UsefulCounters, CounterName)
-| summarize Average=avg(CounterValue), P95=percentile(CounterValue, 95),
-    Minimum=min(CounterValue), Maximum=max(CounterValue), Samples=count()
+| where (Namespace == "Processor" and Name == "UtilizationPercentage")
+    or (Namespace == "Memory" and Name == "AvailableMB")
+    or (Namespace == "LogicalDisk" and Name in ("ReadLatencyMs", "WriteLatencyMs", "FreeSpacePercentage"))
+    or (Namespace == "Network" and Name in ("ReadBytesPerSecond", "WriteBytesPerSecond"))
+| summarize Average=avg(Val), P95=percentile(Val, 95),
+    Minimum=min(Val), Maximum=max(Val), Samples=count()
     by Machine=tostring(split(tolower(_ResourceId), "/")[-1]),
-       ObjectName, CounterName, InstanceName, bin(TimeGenerated, 5m)
-| order by TimeGenerated desc, Machine asc, ObjectName asc, CounterName asc
+       Namespace, Name, bin(TimeGenerated, 5m)
+| order by TimeGenerated desc, Machine asc, Namespace asc, Name asc

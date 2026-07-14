@@ -111,7 +111,7 @@ The proposal must create a fresh backend revision and must not alter replica lim
 
 ## GitHub bridge fallback
 
-Normal path: Azure Monitor alert -> action group -> Azure SRE Agent.
+Normal path: Azure Monitor alert -> Azure SRE Agent AzMonitor incident filter. The referenced action group intentionally has zero receivers and does not notify the agent.
 
 If alert ingestion is too slow for a live demo, run **SRE Agent controlled investigation** manually with an identifier beginning `SYNTH-`, or label an `[SYNTHETIC]` issue with exactly `sre-investigate`. The workflow sends jq-generated JSON to the signed Logic App callback and accepts only `202`, `success=true`, and nonempty `threadId`.
 

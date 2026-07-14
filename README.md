@@ -26,8 +26,8 @@ flowchart LR
   Web -->|same-origin /api| Api[.NET retail API Container App]
   Api --> LAW[Log Analytics]
   Api --> AI[Application Insights]
-  Monitor[WorkingSetBytes Sev2 alert] --> AG[Action Group]
-  AG --> Agent[Azure SRE Agent - Review/Low]
+  Monitor[WorkingSetBytes Sev2 alert] --> AG[Action Group - 0 receivers]
+  Monitor -. AzMonitor incident filter .-> Agent[Azure SRE Agent - Review/Low]
   Agent --> LAW
   Agent --> AI
   Agent --> Repo[Connected GitHub repository]
@@ -157,7 +157,7 @@ Detailed response procedures are in [`docs/runbooks/cart-memory-pressure.md`](do
 
 ## Additive Azure Arc identity POC
 
-An isolated extension models an ADFS/domain-controller observability scenario on the existing ArcBox lab. Azure Arc, AMA, DCR, Log Analytics, alerts, and SRE Agent plumbing are real; `Mercadona.IdentityOps` events are explicitly synthetic (`demoSynthetic=true`) because the lab hosts do not run AD FS or AD DS. The extension does not change the retail UI/API or replace existing ArcBox DCR associations.
+An isolated extension models an ADFS/domain-controller observability scenario on the existing ArcBox lab. Azure Arc, AMA, DCR, Log Analytics, alerts, and SRE Agent plumbing are real; `Mercadona.IdentityOps` events are explicitly synthetic (`demoSynthetic=true`) because the lab hosts do not run AD FS or AD DS. The additive DCR is events-only and reuses existing VM Insights data from `InsightsMetrics` rather than duplicating performance ingestion. The extension does not change the retail UI/API or replace existing ArcBox DCR associations.
 
 Planning is the default and performs no deployment:
 

@@ -196,7 +196,9 @@ Assert-Contains -Source $moduleSource -Expected 'Microsoft.HybridCompute/machine
 Assert-Contains -Source $moduleSource -Expected "kind: 'Windows'" -Case 'Windows-only DCR'
 Assert-Contains -Source $moduleSource -Expected "Provider[@Name=\'Mercadona.IdentityOps\']" -Case 'Dedicated event provider XPath'
 Assert-Contains -Source $moduleSource -Expected "Provider[@Name!=\'Mercadona.IdentityOps\']" -Case 'No duplicate generic provider XPath'
-Assert-Contains -Source $moduleSource -Expected 'samplingFrequencyInSeconds: 60' -Case 'Controlled performance volume'
+Assert-NotMatches -Source $moduleSource -Pattern '(?i)\bperformanceCounters\b|Microsoft-Perf' -Case 'No duplicate performance ingestion'
+Assert-Contains -Source $moduleSource -Expected 'InsightsMetrics' -Case 'Freshness reuses existing VM Insights data'
+Assert-Contains -Source $moduleSource -Expected 'Namespace == "Processor" and Name == "UtilizationPercentage"' -Case 'Stable existing metric freshness signal'
 Assert-Contains -Source $moduleSource -Expected "operator: 'GreaterThanOrEqual'" -Case 'Deterministic static alert threshold'
 Assert-Contains -Source $moduleSource -Expected 'threshold: 8' -Case 'Bounded burst alert threshold'
 Assert-Contains -Source $moduleSource -Expected '| project TimeGenerated, _ResourceId' -Case 'Burst alert returns one row per event'
@@ -257,6 +259,7 @@ Assert-True `
     -Case 'What-if precedes deployment create'
 Assert-Contains -Source $deploySource -Expected 'refusing to overwrite' -Case 'Collision refusal'
 Assert-Contains -Source $deploySource -Expected 'scheduledQueryRules?api-version=2023-12-01' -Case 'Alert collision preflight'
+Assert-Contains -Source $deploySource -Expected 'MSVMI-ama-vmi-default-dcr' -Case 'Existing VM Insights association preflight'
 
 $incidentSource = $scriptSources['start-arc-identity-incident.ps1']
 $recoverySource = $scriptSources['recover-arc-identity-incident.ps1']
@@ -345,10 +348,13 @@ Assert-NotMatches -Source $configureSource -Pattern '(?i)RunAzCliWriteCommands|\
 Assert-Contains -Source $configureSource -Expected "-PropertyName 'mode') -ne 'Review'" -Case 'Review mode preflight'
 Assert-Contains -Source $configureSource -Expected "-PropertyName 'accessLevel') -ne 'Low'" -Case 'Low access preflight'
 Assert-Contains -Source $configureSource -Expected 'refusing to overwrite it' -Case 'SRE resource collision refusal'
+Assert-Contains -Source $configureSource -Expected 'Perf table is expected' -Case 'SRE instructions preserve existing InsightsMetrics source'
 $retailConfigureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'configure-sre-agent.ps1') -Raw
 Assert-Contains -Source $retailConfigureSource -Expected "titleContains = 'mercadona'" -Case 'Existing retail filter baseline'
 Assert-NotMatches -Source $configureSource -Pattern "titleContains\s*=\s*'mercadona'" -Case 'Identity filter does not overlap retail namespace'
 Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected '$freshnessLookbackMinutes = $MaximumIngestionAgeMinutes + 5' -Case 'Verification lookback follows accepted freshness threshold'
+Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected 'MSVMI-ama-vmi-default-dcr' -Case 'Verification preserves existing VM Insights DCR'
+Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected 'no duplicate performance-counter source' -Case 'Verification rejects duplicate counters'
 
 $kqlDirectory = Join-Path $repoRoot 'kql\arc-identity'
 $requiredKqlFiles = @(
@@ -372,9 +378,16 @@ Assert-Contains -Source $syntheticKql -Expected 'demoSynthetic' -Case 'Synthetic
 Assert-Contains -Source $syntheticKql -Expected '| summarize' -Case 'Synthetic KQL aggregate'
 $performanceKql = Get-Content -LiteralPath (Join-Path $kqlDirectory 'performance-correlation.kql') -Raw
 Assert-Contains -Source $performanceKql -Expected '| summarize' -Case 'Performance KQL remains informational and aggregate'
-Assert-NotMatches -Source $performanceKql -Pattern '\|\s*where\s+CounterValue\s*(?:[<>]=?|==|!=)' -Case 'Performance KQL has no threshold predicate'
+Assert-Contains -Source $performanceKql -Expected 'InsightsMetrics' -Case 'Performance KQL reuses VM Insights'
+Assert-Contains -Source $performanceKql -Expected 'UtilizationPercentage' -Case 'Performance KQL includes CPU'
+Assert-Contains -Source $performanceKql -Expected 'AvailableMB' -Case 'Performance KQL includes available memory'
+Assert-Contains -Source $performanceKql -Expected 'ReadLatencyMs' -Case 'Performance KQL includes disk latency'
+Assert-Contains -Source $performanceKql -Expected 'FreeSpacePercentage' -Case 'Performance KQL includes disk free space'
+Assert-Contains -Source $performanceKql -Expected 'ReadBytesPerSecond' -Case 'Performance KQL includes network'
+Assert-NotMatches -Source $performanceKql -Pattern '\|\s*where\s+Val\s*(?:[<>]=?|==|!=)' -Case 'Performance KQL has no threshold predicate'
 $freshnessKql = Get-Content -LiteralPath (Join-Path $kqlDirectory 'data-freshness.kql') -Raw
-Assert-Contains -Source $freshnessKql -Expected '["Heartbeat", "Perf"]' -Case 'Freshness requires continuous signals only'
+Assert-Contains -Source $freshnessKql -Expected '["Heartbeat", "InsightsMetrics"]' -Case 'Freshness requires existing continuous signals only'
+Assert-NotMatches -Source $freshnessKql -Pattern '\bPerf\b' -Case 'Freshness does not query intentionally empty Perf'
 Assert-NotMatches -Source $freshnessKql -Pattern 'Signal="Event"' -Case 'Sporadic Event data is not marked stale'
 Assert-Contains -Source $freshnessKql -Expected 'datetime_utc_to_local(CurrentUtc, "Europe/Madrid")' -Case 'Operator freshness query observes DST'
 Assert-Contains -Source $freshnessKql -Expected 'MadridMinuteOfDay >= 500' -Case 'Operator query observes startup grace'
@@ -446,7 +459,10 @@ foreach ($documentedBaseline in @(
         'ninguna fila en `Event`, `SecurityEvent` o `Perf`',
         '4,38 % / 11,51 %',
         '9,71 % / 19,32 %',
-        'no son umbrales de alerta'
+        'no son umbrales de alerta',
+        'Perf` permanece vacío por diseño',
+        '174 000 filas',
+        'No notifica al SRE Agent'
     )) {
     Assert-Contains -Source $documentationText -Expected $documentedBaseline -Case 'Audited ArcBox baseline documentation'
 }

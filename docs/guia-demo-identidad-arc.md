@@ -12,7 +12,7 @@ La demo muestra **Azure Arc, AMA, DCR, Log Analytics, Azure Monitor y Azure SRE 
 2. Esperar `Connected` en `ArcBox-Win2K22` y `ArcBox-Win2K25`.
 3. Confirmar AMA `Succeeded`.
 4. Seleccionar la suscripción exacta.
-5. Ejecutar la verificación y no continuar si Heartbeat/Perf no están frescos.
+5. Ejecutar la verificación y no continuar si Heartbeat/InsightsMetrics no están frescos.
 
 ```powershell
 az account set --subscription 5305e853-a63b-4b82-9a3f-6fde18c1a798
@@ -38,9 +38,9 @@ Tras revisión y aprobación explícita:
 
 Esta secuencia no cambia el frontend, la API retail, el escenario de memoria ni recursos de Jumpstart existentes.
 
-Antes de esta configuración inicial es normal que LAW tenga Heartbeat e `InsightsMetrics`, pero no `Perf` ni `Event`. La DCR nueva añade esas dos señales solo a los Windows objetivo. El action group existente permanece habilitado sin receptores; la demo no añade notificaciones externas.
+Antes de esta configuración inicial es normal que LAW tenga Heartbeat e `InsightsMetrics`, pero no `Perf` ni `Event`. `Perf` permanece vacío por diseño: la DCR nueva añade solo `Event` y reutiliza las métricas de `MSVMI-ama-vmi-default-dcr`. El action group existente permanece habilitado sin receptores y no notifica al agente; el filtro de la plataforma Azure Monitor del SRE Agent detecta las Sev2.
 
-La alerta de frescura se suprime fuera de la jornada esperada: 08:20 `Europe/Madrid`, después de 20 minutos de gracia, hasta el autoapagado `shutdown-computevm-ArcBox-Client` de las 18:00 UTC. `Europe/Madrid` aplica CET/CEST automáticamente; no presentar la ausencia nocturna de Heartbeat/Perf como incidente.
+La alerta de frescura se suprime fuera de la jornada esperada: 08:20 `Europe/Madrid`, después de 20 minutos de gracia, hasta el autoapagado `shutdown-computevm-ArcBox-Client` de las 18:00 UTC. `Europe/Madrid` aplica CET/CEST automáticamente; no presentar la ausencia nocturna de Heartbeat/InsightsMetrics como incidente.
 
 ## Guion de 15 minutos
 
@@ -50,7 +50,7 @@ Mostrar:
 
 - dos servidores Windows anidados conectados de verdad por Azure Arc;
 - AMA ya existente;
-- DCR adicional, sin tocar VM Insights;
+- DCR adicional solo de eventos, sin tocar ni duplicar VM Insights;
 - workspace ArcBox y acción del SRE Agent existentes;
 - agente en `Review/Low`.
 
@@ -86,7 +86,7 @@ Anotar el correlation ID. La ejecución predeterminada produce 12 eventos por ho
 3. Abrir la investigación del SRE Agent.
 4. Comprobar que el agente:
    - etiqueta la identidad como sintética;
-   - correlaciona Heartbeat, Perf, Event, extensiones y cambios;
+   - correlaciona Heartbeat, InsightsMetrics existente, Event, extensiones y cambios;
    - no expone datos personales;
    - no ejecuta remediación;
    - deja recomendaciones para revisión humana.
