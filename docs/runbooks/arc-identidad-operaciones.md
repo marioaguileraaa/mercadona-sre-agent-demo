@@ -31,6 +31,8 @@ No iniciar la demo si la VM padre, una máquina anidada, AMA o LAW no están san
 
 Antes del primer despliegue, la línea base esperada es Heartbeat e `InsightsMetrics` para los cinco invitados, Change Tracking en tres Windows y ninguna fila en `Event`, `SecurityEvent` o `Perf`. La DCR de VM Insights existente produce `InsightsMetrics`. El nuevo `Perf` y los eventos Application/System aparecen solo después de desplegar la DCR dedicada; por eso `verify-arc-identity.ps1` se ejecuta después del despliegue inicial.
 
+Como referencia de dos horas, Win2K22 mostró CPU 4,38 % de media/11,51 % p95, ~2,53 GB disponibles, ~1 ms de latencia de disco y 80,31 % libre; Win2K25 mostró 9,71 %/19,32 %, ~2,19 GB, ~1,1-1,3 ms y 58,73 %. Usar estos datos solo para contexto del informe. No convertirlos en umbrales ni alertas de CPU, memoria, disco o espacio sin un baseline más largo y change control.
+
 ## Secuencia de configuración
 
 Las dos primeras órdenes son de solo lectura/planificación:

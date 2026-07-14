@@ -69,6 +69,8 @@ Ejecutar las consultas:
 
 No mostrar mensajes de eventos ni nombres de usuario.
 
+La referencia auditada de dos horas es: Win2K22 CPU 4,38 % media/11,51 % p95, memoria ~2,53 GB, disco ~1 ms y 80,31 % libre; Win2K25 CPU 9,71 %/19,32 %, memoria ~2,19 GB, disco ~1,1-1,3 ms y 58,73 % libre. Presentarla como contexto informativo, no como SLO ni umbral. Este POC no crea alertas por valores de rendimiento.
+
 ### 3. Generar la ráfaga
 
 ```powershell

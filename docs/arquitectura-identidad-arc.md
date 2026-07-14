@@ -37,6 +37,15 @@ La auditoría previa del 14 de julio de 2026 confirmó:
 
 Esta extensión no crea automatización de arranque. Añade `Perf` y `Event` únicamente para los dos Windows objetivo después del despliegue de su DCR dedicada. La ausencia de esas tablas antes del primer despliegue es la línea base esperada, no un fallo de ArcBox.
 
+La ventana auditada de dos horas aporta esta referencia informativa para correlación:
+
+| Host | CPU media / p95 | Memoria disponible | Latencia de disco | Espacio libre |
+|---|---:|---:|---:|---:|
+| `ArcBox-Win2K22` | 4,38 % / 11,51 % | ~2,53 GB | ~1 ms | 80,31 % |
+| `ArcBox-Win2K25` | 9,71 % / 19,32 % | ~2,19 GB | ~1,1-1,3 ms | 58,73 % |
+
+Estos valores no son umbrales de alerta ni SLO. En este primer POC, CPU, memoria, disco y red se usan solo para correlación e informes. No existe una alerta Sev2 por valor de rendimiento: la regla cuantitativa determinista es la ráfaga sintética acotada; la otra Sev2 detecta ausencia de Heartbeat/Perf durante la ventana operativa, no degradación de sus valores.
+
 ## Flujo
 
 ```mermaid

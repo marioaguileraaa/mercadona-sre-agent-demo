@@ -208,6 +208,7 @@ Assert-Contains -Source $moduleSource -Expected 'datetime_part("Hour", CurrentUt
 Assert-Contains -Source $moduleSource -Expected "displayName: 'ArcBox IdentityOps synthetic AD FS token-failure burst'" -Case 'Identity alert title namespace'
 Assert-Contains -Source $moduleSource -Expected "displayName: 'ArcBox IdentityOps heartbeat or data freshness loss'" -Case 'Freshness alert title namespace'
 Assert-NotMatches -Source $moduleSource -Pattern "displayName:\s*'Mercadona IdentityOps" -Case 'No overlap with retail Mercadona alert filter'
+Assert-NotMatches -Source $moduleSource -Pattern '\bCounterValue\b' -Case 'No performance-value alert threshold'
 Assert-Contains -Source $moduleSource -Expected 'severity: 2' -Case 'Sev2 alerts'
 Assert-Contains -Source $moduleSource -Expected 'autoMitigate: true' -Case 'Alert auto resolution'
 Assert-Contains -Source $moduleSource -Expected 'actionGroupResourceId' -Case 'Existing action group parameter'
@@ -369,6 +370,9 @@ foreach ($kqlFileName in $requiredKqlFiles) {
 $syntheticKql = Get-Content -LiteralPath (Join-Path $kqlDirectory 'synthetic-token-failure-burst.kql') -Raw
 Assert-Contains -Source $syntheticKql -Expected 'demoSynthetic' -Case 'Synthetic KQL marker'
 Assert-Contains -Source $syntheticKql -Expected '| summarize' -Case 'Synthetic KQL aggregate'
+$performanceKql = Get-Content -LiteralPath (Join-Path $kqlDirectory 'performance-correlation.kql') -Raw
+Assert-Contains -Source $performanceKql -Expected '| summarize' -Case 'Performance KQL remains informational and aggregate'
+Assert-NotMatches -Source $performanceKql -Pattern '\|\s*where\s+CounterValue\s*(?:[<>]=?|==|!=)' -Case 'Performance KQL has no threshold predicate'
 $freshnessKql = Get-Content -LiteralPath (Join-Path $kqlDirectory 'data-freshness.kql') -Raw
 Assert-Contains -Source $freshnessKql -Expected '["Heartbeat", "Perf"]' -Case 'Freshness requires continuous signals only'
 Assert-NotMatches -Source $freshnessKql -Pattern 'Signal="Event"' -Case 'Sporadic Event data is not marked stale'
@@ -439,7 +443,10 @@ foreach ($documentedBaseline in @(
         '07:30 UTC',
         'InsightsMetrics',
         'cero receptores',
-        'ninguna fila en `Event`, `SecurityEvent` o `Perf`'
+        'ninguna fila en `Event`, `SecurityEvent` o `Perf`',
+        '4,38 % / 11,51 %',
+        '9,71 % / 19,32 %',
+        'no son umbrales de alerta'
     )) {
     Assert-Contains -Source $documentationText -Expected $documentedBaseline -Case 'Audited ArcBox baseline documentation'
 }
