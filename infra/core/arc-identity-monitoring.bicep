@@ -159,7 +159,6 @@ resource tokenFailureAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' =
     targetResourceTypes: [
       'Microsoft.OperationalInsights/workspaces'
     ]
-    autoMitigate: true
     resolveConfiguration: {
       autoResolved: true
       timeToResolve: 'PT10M'
@@ -205,14 +204,13 @@ resource dataFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' 
     enabled: true
     evaluationFrequency: 'PT5M'
     windowSize: 'PT5M'
-    overrideQueryTimeRange: 'PT20M'
+    overrideQueryTimeRange: 'PT30M'
     scopes: [
       workspaceResourceId
     ]
     targetResourceTypes: [
       'Microsoft.OperationalInsights/workspaces'
     ]
-    autoMitigate: true
     resolveConfiguration: {
       autoResolved: true
       timeToResolve: 'PT10M'

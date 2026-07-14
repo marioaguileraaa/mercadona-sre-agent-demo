@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.42.1.51946",
-      "templateHash": "15786812930904591506"
+      "templateHash": "7966877169150390660"
     }
   },
   "parameters": {
@@ -134,7 +134,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.42.1.51946",
-              "templateHash": "12512510924331600263"
+              "templateHash": "9052326804066398208"
             }
           },
           "parameters": {
@@ -290,7 +290,6 @@
                 "targetResourceTypes": [
                   "Microsoft.OperationalInsights/workspaces"
                 ],
-                "autoMitigate": true,
                 "resolveConfiguration": {
                   "autoResolved": true,
                   "timeToResolve": "PT10M"
@@ -337,14 +336,13 @@
                 "enabled": true,
                 "evaluationFrequency": "PT5M",
                 "windowSize": "PT5M",
-                "overrideQueryTimeRange": "PT20M",
+                "overrideQueryTimeRange": "PT30M",
                 "scopes": [
                   "[parameters('workspaceResourceId')]"
                 ],
                 "targetResourceTypes": [
                   "Microsoft.OperationalInsights/workspaces"
                 ],
-                "autoMitigate": true,
                 "resolveConfiguration": {
                   "autoResolved": true,
                   "timeToResolve": "PT10M"

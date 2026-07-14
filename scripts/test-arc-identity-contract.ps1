@@ -424,7 +424,10 @@ Assert-Contains -Source $moduleSource -Expected "displayName: 'ArcBox IdentityOp
 Assert-NotMatches -Source $moduleSource -Pattern "displayName:\s*'Mercadona IdentityOps" -Case 'No overlap with retail Mercadona alert filter'
 Assert-NotMatches -Source $moduleSource -Pattern '\bCounterValue\b' -Case 'No performance-value alert threshold'
 Assert-Contains -Source $moduleSource -Expected 'severity: 2' -Case 'Sev2 alerts'
-Assert-Contains -Source $moduleSource -Expected 'autoMitigate: true' -Case 'Alert auto resolution'
+Assert-Contains -Source $moduleSource -Expected 'resolveConfiguration:' -Case 'Deterministic alert resolution'
+Assert-Contains -Source $moduleSource -Expected "overrideQueryTimeRange: 'PT30M'" -Case 'Supported freshness query override'
+Assert-NotMatches -Source $moduleSource -Pattern '\bPT20M\b' -Case 'Unsupported freshness query override'
+Assert-NotMatches -Source $moduleSource -Pattern '(?m)^\s*autoMitigate\s*:' -Case 'Resolve configuration omits mutually exclusive autoMitigate'
 Assert-Contains -Source $moduleSource -Expected 'actionGroupResourceId' -Case 'Existing action group parameter'
 Assert-NotMatches -Source $moduleSource -Pattern '(?im)^\s*''?Security!' -Case 'No broad Security channel'
 Assert-NotMatches -Source ($orchestrationSource + $moduleSource) `
@@ -451,6 +454,47 @@ $deploymentResources = @($compiledTemplate['resources'])
 Assert-True -Condition ($deploymentResources.Count -eq 1) -Case 'Single isolated resource-group deployment module'
 Assert-True -Condition ($deploymentResources[0]['type'] -eq 'Microsoft.Resources/deployments') -Case 'Compiled orchestration uses nested deployment'
 Assert-True -Condition ($deploymentResources[0]['properties']['mode'] -eq 'Incremental') -Case 'Incremental-only deployment mode'
+$nestedResources = @($deploymentResources[0]['properties']['template']['resources'])
+$alertResources = @(
+    $nestedResources | Where-Object {
+        $_['type'] -eq 'Microsoft.Insights/scheduledQueryRules'
+    }
+)
+Assert-True -Condition ($alertResources.Count -eq 2) -Case 'Exactly two scheduled-query alert resources'
+$expectedResolveConfiguration = [ordered]@{
+    autoResolved = $true
+    timeToResolve = 'PT10M'
+}
+foreach ($alertResource in $alertResources) {
+    $alertProperties = $alertResource['properties']
+    Assert-True `
+        -Condition (-not $alertProperties.ContainsKey('autoMitigate')) `
+        -Case "Alert '$($alertResource['name'])' omits mutually exclusive autoMitigate"
+    Assert-True `
+        -Condition (
+            (ConvertTo-CanonicalJson -Value $alertProperties['resolveConfiguration']) -ceq
+            (ConvertTo-CanonicalJson -Value $expectedResolveConfiguration)
+        ) `
+        -Case "Alert '$($alertResource['name'])' exact resolveConfiguration"
+}
+$freshnessAlertResources = @(
+    $alertResources | Where-Object {
+        $_['name'] -eq "[parameters('dataFreshnessAlertName')]"
+    }
+)
+Assert-True -Condition ($freshnessAlertResources.Count -eq 1) -Case 'Single freshness alert resource'
+Assert-True `
+    -Condition ($freshnessAlertResources[0]['properties']['overrideQueryTimeRange'] -eq 'PT30M') `
+    -Case 'Compiled freshness override uses supported PT30M'
+$tokenAlertResources = @(
+    $alertResources | Where-Object {
+        $_['name'] -eq "[parameters('tokenFailureAlertName')]"
+    }
+)
+Assert-True -Condition ($tokenAlertResources.Count -eq 1) -Case 'Single token-failure alert resource'
+Assert-True `
+    -Condition (-not $tokenAlertResources[0]['properties'].ContainsKey('overrideQueryTimeRange')) `
+    -Case 'Token-failure alert preserves default query range'
 
 $parameterPath = Join-Path $repoRoot 'infra\arc-identity.parameters.json'
 $parameters = Get-Content -LiteralPath $parameterPath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
@@ -658,9 +702,14 @@ Assert-Contains -Source $configureSource -Expected 'Perf table is expected' -Cas
 $retailConfigureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'configure-sre-agent.ps1') -Raw
 Assert-Contains -Source $retailConfigureSource -Expected "titleContains = 'mercadona'" -Case 'Existing retail filter baseline'
 Assert-NotMatches -Source $configureSource -Pattern "titleContains\s*=\s*'mercadona'" -Case 'Identity filter does not overlap retail namespace'
-Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected '$freshnessLookbackMinutes = $MaximumIngestionAgeMinutes + 5' -Case 'Verification lookback follows accepted freshness threshold'
-Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected 'MSVMI-ama-vmi-default-dcr' -Case 'Verification preserves existing VM Insights DCR'
-Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected 'no duplicate performance-counter source' -Case 'Verification rejects duplicate counters'
+$verifySource = $scriptSources['verify-arc-identity.ps1']
+Assert-Contains -Source $verifySource -Expected '$freshnessLookbackMinutes = $MaximumIngestionAgeMinutes + 5' -Case 'Verification lookback follows accepted freshness threshold'
+Assert-Contains -Source $verifySource -Expected 'MSVMI-ama-vmi-default-dcr' -Case 'Verification preserves existing VM Insights DCR'
+Assert-Contains -Source $verifySource -Expected 'no duplicate performance-counter source' -Case 'Verification rejects duplicate counters'
+Assert-Contains -Source $verifySource -Expected '$autoMitigate = Get-ArcIdentityOptionalPropertyValue' -Case 'Verification tolerates absent autoMitigate'
+Assert-Contains -Source $verifySource -Expected '$null -ne $autoMitigate -and $autoMitigate -ne $true' -Case 'Verification rejects conflicting autoMitigate'
+Assert-NotMatches -Source $verifySource -Pattern '\$properties\.autoMitigate' -Case 'Verification does not require autoMitigate response'
+Assert-Contains -Source $verifySource -Expected "-ExpectedOverrideQueryTimeRange 'PT30M'" -Case 'Verification expects supported freshness override'
 
 $kqlDirectory = Join-Path $repoRoot 'kql\arc-identity'
 $requiredKqlFiles = @(
