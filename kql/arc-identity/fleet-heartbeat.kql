@@ -1,0 +1,18 @@
+let TargetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25"
+]);
+let Expected =
+  print ResourceIds=TargetResourceIds
+  | mv-expand ResourceId=ResourceIds to typeof(string)
+  | project ResourceId=tolower(ResourceId), Machine=tostring(split(ResourceId, "/")[-1]);
+let Latest =
+  Heartbeat
+  | where TimeGenerated >= ago(24h)
+  | where set_has_element(TargetResourceIds, tolower(_ResourceId))
+  | summarize LastHeartbeat=max(TimeGenerated), Samples=count() by ResourceId=tolower(_ResourceId);
+Expected
+| join kind=leftouter Latest on ResourceId
+| project Machine, LastHeartbeat, Samples=coalesce(Samples, 0),
+    FreshWithin5m=isnotnull(LastHeartbeat) and LastHeartbeat >= ago(5m)
+| order by Machine asc

@@ -1,0 +1,432 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "15786812930904591506"
+    }
+  },
+  "parameters": {
+    "arcResourceGroupName": {
+      "type": "string",
+      "metadata": {
+        "description": "Existing ArcBox resource group. This deployment never creates or replaces the resource group."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "westeurope",
+      "metadata": {
+        "description": "Azure region of the existing Arc-enabled machines and the dedicated DCR."
+      }
+    },
+    "workspaceResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full resource ID of the existing ArcBox Log Analytics workspace."
+      }
+    },
+    "actionGroupResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full resource ID of the existing action group reused by both alerts."
+      }
+    },
+    "targetMachineNames": {
+      "type": "array",
+      "defaultValue": [
+        "ArcBox-Win2K22",
+        "ArcBox-Win2K25"
+      ],
+      "minLength": 2,
+      "maxLength": 2,
+      "metadata": {
+        "description": "Exact existing Windows Arc machines associated with the dedicated DCR."
+      }
+    },
+    "dataCollectionRuleName": {
+      "type": "string",
+      "defaultValue": "dcr-arcbox-identity-ops",
+      "metadata": {
+        "description": "Name of the additive identity-operations data collection rule."
+      }
+    },
+    "dataCollectionRuleAssociationName": {
+      "type": "string",
+      "defaultValue": "assoc-arcbox-identity-ops",
+      "metadata": {
+        "description": "Name used for the new DCR association on each target machine."
+      }
+    },
+    "tokenFailureAlertName": {
+      "type": "string",
+      "defaultValue": "alert-arcbox-identity-token-failure-burst",
+      "metadata": {
+        "description": "Name of the synthetic AD FS token-failure burst alert."
+      }
+    },
+    "dataFreshnessAlertName": {
+      "type": "string",
+      "defaultValue": "alert-arcbox-identity-data-freshness",
+      "metadata": {
+        "description": "Name of the Arc heartbeat and telemetry freshness alert."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {
+        "purpose": "sre-agent-demo",
+        "environment": "demo",
+        "dataClassification": "synthetic",
+        "scenario": "synthetic-identity-arc"
+      },
+      "metadata": {
+        "description": "Tags applied only to resources owned by this additive extension."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "arc-identity-monitoring",
+      "resourceGroup": "[parameters('arcResourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "workspaceResourceId": {
+            "value": "[parameters('workspaceResourceId')]"
+          },
+          "actionGroupResourceId": {
+            "value": "[parameters('actionGroupResourceId')]"
+          },
+          "targetMachineNames": {
+            "value": "[parameters('targetMachineNames')]"
+          },
+          "dataCollectionRuleName": {
+            "value": "[parameters('dataCollectionRuleName')]"
+          },
+          "dataCollectionRuleAssociationName": {
+            "value": "[parameters('dataCollectionRuleAssociationName')]"
+          },
+          "tokenFailureAlertName": {
+            "value": "[parameters('tokenFailureAlertName')]"
+          },
+          "dataFreshnessAlertName": {
+            "value": "[parameters('dataFreshnessAlertName')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.42.1.51946",
+              "templateHash": "12512510924331600263"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region of the existing Arc-enabled machines and the dedicated DCR."
+              }
+            },
+            "workspaceResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Full resource ID of the existing ArcBox Log Analytics workspace."
+              }
+            },
+            "actionGroupResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Full resource ID of the existing action group reused by both alerts."
+              }
+            },
+            "targetMachineNames": {
+              "type": "array",
+              "minLength": 2,
+              "maxLength": 2,
+              "metadata": {
+                "description": "Exact existing Windows Arc machines associated with the dedicated DCR."
+              }
+            },
+            "dataCollectionRuleName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the additive identity-operations data collection rule."
+              }
+            },
+            "dataCollectionRuleAssociationName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name used for the new DCR association on each target machine."
+              }
+            },
+            "tokenFailureAlertName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the synthetic AD FS token-failure burst alert."
+              }
+            },
+            "dataFreshnessAlertName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Arc heartbeat and telemetry freshness alert."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied only to resources owned by this additive extension."
+              }
+            }
+          },
+          "variables": {
+            "copy": [
+              {
+                "name": "targetMachineResourceIds",
+                "count": "[length(parameters('targetMachineNames'))]",
+                "input": "[toLower(resourceId('Microsoft.HybridCompute/machines', parameters('targetMachineNames')[copyIndex('targetMachineResourceIds')]))]"
+              }
+            ],
+            "logAnalyticsDestinationName": "arcboxIdentityOpsLaw",
+            "targetMachineResourceIdsJson": "[string(variables('targetMachineResourceIds'))]",
+            "tokenFailureQuery": "[format('let TargetResourceIds = dynamic({0});\r\nEvent\r\n| where TimeGenerated >= ago(5m)\r\n| where set_has_element(TargetResourceIds, tolower(_ResourceId))\r\n| where EventLog == \"Application\"\r\n| where Source == \"Mercadona.IdentityOps\" and EventID == 4101\r\n| where RenderedDescription contains ''\"demoSynthetic\":true''\r\n| project TimeGenerated, _ResourceId\r\n', variables('targetMachineResourceIdsJson'))]",
+            "dataFreshnessQuery": "[format('let TargetResourceIds = dynamic({0});\r\nlet CurrentUtc = now();\r\nlet CurrentMadrid = datetime_utc_to_local(CurrentUtc, \"Europe/Madrid\");\r\nlet MadridMinuteOfDay = datetime_part(\"Hour\", CurrentMadrid) * 60 + datetime_part(\"Minute\", CurrentMadrid);\r\nlet IsExpectedOperatingWindow = MadridMinuteOfDay >= 500 and datetime_part(\"Hour\", CurrentUtc) < 18;\r\nlet ExpectedResources =\r\n  print ResourceIds=TargetResourceIds\r\n  | mv-expand ResourceId=ResourceIds to typeof(string)\r\n  | project ResourceId=tolower(ResourceId);\r\nlet ExpectedSignals =\r\n  ExpectedResources\r\n  | extend JoinKey=1\r\n  | join kind=inner (\r\n      datatable(Signal:string) [\"Heartbeat\", \"InsightsMetrics\"]\r\n      | extend JoinKey=1\r\n    ) on JoinKey\r\n  | project ResourceId, Signal;\r\nlet LatestSignals =\r\n  union\r\n    (Heartbeat\r\n      | where TimeGenerated >= ago(20m)\r\n      | where set_has_element(TargetResourceIds, tolower(_ResourceId))\r\n      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal=\"Heartbeat\"),\r\n    (InsightsMetrics\r\n      | where TimeGenerated >= ago(20m)\r\n      | where set_has_element(TargetResourceIds, tolower(_ResourceId))\r\n      | where Namespace == \"Processor\" and Name == \"UtilizationPercentage\"\r\n      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal=\"InsightsMetrics\")\r\n  | summarize LastSeen=max(TimeGenerated) by ResourceId, Signal;\r\nExpectedSignals\r\n| join kind=leftouter LatestSignals on ResourceId, Signal\r\n| where IsExpectedOperatingWindow\r\n| where isnull(LastSeen) or LastSeen < ago(10m)\r\n| project ResourceId, Signal\r\n', variables('targetMachineResourceIdsJson'))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Insights/dataCollectionRules",
+              "apiVersion": "2024-03-11",
+              "name": "[parameters('dataCollectionRuleName')]",
+              "location": "[parameters('location')]",
+              "kind": "Windows",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "description": "Additive events-only Arc identity telemetry. Performance remains in the existing VM Insights DCR and InsightsMetrics.",
+                "dataSources": {
+                  "windowsEventLogs": [
+                    {
+                      "name": "identityOpsAndHostEvents",
+                      "streams": [
+                        "Microsoft-Event"
+                      ],
+                      "xPathQueries": [
+                        "Application!*[System[Provider[@Name='Mercadona.IdentityOps'] and (EventID=4101 or EventID=4102)]]",
+                        "System!*[System[(Level=1 or Level=2 or Level=3)]]",
+                        "Application!*[System[(Level=1 or Level=2 or Level=3) and Provider[@Name!='Mercadona.IdentityOps']]]"
+                      ]
+                    }
+                  ]
+                },
+                "destinations": {
+                  "logAnalytics": [
+                    {
+                      "name": "[variables('logAnalyticsDestinationName')]",
+                      "workspaceResourceId": "[parameters('workspaceResourceId')]"
+                    }
+                  ]
+                },
+                "dataFlows": [
+                  {
+                    "streams": [
+                      "Microsoft-Event"
+                    ],
+                    "destinations": [
+                      "[variables('logAnalyticsDestinationName')]"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "copy": {
+                "name": "identityOpsAssociations",
+                "count": "[length(parameters('targetMachineNames'))]"
+              },
+              "type": "Microsoft.Insights/dataCollectionRuleAssociations",
+              "apiVersion": "2024-03-11",
+              "scope": "[resourceId('Microsoft.HybridCompute/machines', parameters('targetMachineNames')[copyIndex()])]",
+              "name": "[parameters('dataCollectionRuleAssociationName')]",
+              "properties": {
+                "dataCollectionRuleId": "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName'))]",
+                "description": "[format('Additive identity-operations DCR association for {0}; existing associations remain untouched.', parameters('targetMachineNames')[copyIndex()])]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "[parameters('tokenFailureAlertName')]",
+              "location": "[parameters('location')]",
+              "kind": "LogAlert",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "ArcBox IdentityOps synthetic AD FS token-failure burst",
+                "description": "Sev2 demo alert. Counts only events marked demoSynthetic=true from Mercadona.IdentityOps on the two target Arc machines.",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT1M",
+                "windowSize": "PT5M",
+                "scopes": [
+                  "[parameters('workspaceResourceId')]"
+                ],
+                "targetResourceTypes": [
+                  "Microsoft.OperationalInsights/workspaces"
+                ],
+                "autoMitigate": true,
+                "resolveConfiguration": {
+                  "autoResolved": true,
+                  "timeToResolve": "PT10M"
+                },
+                "checkWorkspaceAlertsStorageConfigured": false,
+                "skipQueryValidation": false,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "[variables('tokenFailureQuery')]",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThanOrEqual",
+                      "threshold": 8,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[parameters('actionGroupResourceId')]"
+                  ],
+                  "customProperties": {
+                    "dataClassification": "synthetic",
+                    "demoSynthetic": "true",
+                    "scenario": "identity-operations"
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "[parameters('dataFreshnessAlertName')]",
+              "location": "[parameters('location')]",
+              "kind": "LogAlert",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "ArcBox IdentityOps heartbeat or data freshness loss",
+                "description": "Sev2 alert when Heartbeat or existing VM Insights data in InsightsMetrics is stale during the expected ArcBox operating window: 08:20 Europe/Madrid through 18:00 UTC.",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT5M",
+                "overrideQueryTimeRange": "PT20M",
+                "scopes": [
+                  "[parameters('workspaceResourceId')]"
+                ],
+                "targetResourceTypes": [
+                  "Microsoft.OperationalInsights/workspaces"
+                ],
+                "autoMitigate": true,
+                "resolveConfiguration": {
+                  "autoResolved": true,
+                  "timeToResolve": "PT10M"
+                },
+                "checkWorkspaceAlertsStorageConfigured": false,
+                "skipQueryValidation": false,
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "[variables('dataFreshnessQuery')]",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThanOrEqual",
+                      "threshold": 1,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[parameters('actionGroupResourceId')]"
+                  ],
+                  "customProperties": {
+                    "dataClassification": "synthetic",
+                    "scenario": "identity-operations",
+                    "operatingWindow": "08:20 Europe/Madrid - 18:00 UTC"
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "dataCollectionRuleId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName'))]"
+            },
+            "dataCollectionRuleAssociationIds": {
+              "type": "array",
+              "copy": {
+                "count": "[length(range(0, length(parameters('targetMachineNames'))))]",
+                "input": "[extensionResourceId(resourceId('Microsoft.HybridCompute/machines', parameters('targetMachineNames')[copyIndex()]), 'Microsoft.Insights/dataCollectionRuleAssociations', parameters('dataCollectionRuleAssociationName'))]"
+              }
+            },
+            "tokenFailureAlertId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/scheduledQueryRules', parameters('tokenFailureAlertName'))]"
+            },
+            "dataFreshnessAlertId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/scheduledQueryRules', parameters('dataFreshnessAlertName'))]"
+            },
+            "targetMachineResourceIds": {
+              "type": "array",
+              "value": "[variables('targetMachineResourceIds')]"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "dataCollectionRuleId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('arcResourceGroupName')), 'Microsoft.Resources/deployments', 'arc-identity-monitoring'), '2025-04-01').outputs.dataCollectionRuleId.value]"
+    },
+    "dataCollectionRuleAssociationIds": {
+      "type": "array",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('arcResourceGroupName')), 'Microsoft.Resources/deployments', 'arc-identity-monitoring'), '2025-04-01').outputs.dataCollectionRuleAssociationIds.value]"
+    },
+    "tokenFailureAlertId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('arcResourceGroupName')), 'Microsoft.Resources/deployments', 'arc-identity-monitoring'), '2025-04-01').outputs.tokenFailureAlertId.value]"
+    },
+    "dataFreshnessAlertId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('arcResourceGroupName')), 'Microsoft.Resources/deployments', 'arc-identity-monitoring'), '2025-04-01').outputs.dataFreshnessAlertId.value]"
+    },
+    "targetMachineResourceIds": {
+      "type": "array",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('arcResourceGroupName')), 'Microsoft.Resources/deployments', 'arc-identity-monitoring'), '2025-04-01').outputs.targetMachineResourceIds.value]"
+    }
+  }
+}

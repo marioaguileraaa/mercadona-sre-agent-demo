@@ -1,0 +1,36 @@
+let TargetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25"
+]);
+let CurrentUtc = now();
+let CurrentMadrid = datetime_utc_to_local(CurrentUtc, "Europe/Madrid");
+let MadridMinuteOfDay = datetime_part("Hour", CurrentMadrid) * 60 + datetime_part("Minute", CurrentMadrid);
+let IsExpectedOperatingWindow = MadridMinuteOfDay >= 500 and datetime_part("Hour", CurrentUtc) < 18;
+let Expected =
+  print ResourceIds=TargetResourceIds
+  | mv-expand ResourceId=ResourceIds to typeof(string)
+  | project ResourceId=tolower(ResourceId)
+  | extend JoinKey=1
+  | join kind=inner (
+      datatable(Signal:string) ["Heartbeat", "InsightsMetrics"]
+      | extend JoinKey=1
+    ) on JoinKey
+  | project ResourceId, Signal;
+let Latest =
+  union
+    (Heartbeat
+      | where TimeGenerated >= ago(24h)
+      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="Heartbeat"),
+    (InsightsMetrics
+      | where TimeGenerated >= ago(24h)
+      | where Namespace == "Processor" and Name == "UtilizationPercentage"
+      | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="InsightsMetrics")
+  | where set_has_element(TargetResourceIds, ResourceId)
+  | summarize LastSeen=max(TimeGenerated), Records=count() by ResourceId, Signal;
+Expected
+| join kind=leftouter Latest on ResourceId, Signal
+| where IsExpectedOperatingWindow
+| project Machine=tostring(split(ResourceId, "/")[-1]), Signal, LastSeen,
+    Records=coalesce(Records, 0),
+    FreshWithin15m=isnotnull(LastSeen) and LastSeen >= ago(15m)
+| order by Machine asc, Signal asc
