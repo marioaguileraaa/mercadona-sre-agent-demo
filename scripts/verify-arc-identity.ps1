@@ -290,9 +290,14 @@ function Assert-ArcIdentityAlertRule {
         $properties = $alert
     }
     if ($properties.enabled -ne $true -or
-        [int] $properties.severity -ne 2 -or
-        $properties.autoMitigate -ne $true) {
-        throw "Alert '$AlertName' must remain enabled, Sev2, and auto-resolving."
+        [int] $properties.severity -ne 2) {
+        throw "Alert '$AlertName' must remain enabled and Sev2."
+    }
+    $autoMitigate = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'autoMitigate'
+    if ($null -ne $autoMitigate -and $autoMitigate -ne $true) {
+        throw "Alert '$AlertName' returned autoMitigate='$autoMitigate', which conflicts with deterministic resolveConfiguration auto-resolution."
     }
     $provisioningState = Get-ArcIdentityFirstPropertyValue `
         -InputObjects @($properties, $alert) `
@@ -316,10 +321,13 @@ function Assert-ArcIdentityAlertRule {
         )) {
         throw "Alert '$AlertName' does not reuse the expected action group."
     }
+    $resolveConfiguration = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'resolveConfiguration'
     if ($properties.evaluationFrequency -ne $ExpectedEvaluationFrequency -or
         $properties.windowSize -ne $ExpectedWindowSize -or
-        $properties.resolveConfiguration.autoResolved -ne $true -or
-        $properties.resolveConfiguration.timeToResolve -ne 'PT10M') {
+        (Get-ArcIdentityOptionalPropertyValue -InputObject $resolveConfiguration -PropertyName 'autoResolved') -ne $true -or
+        (Get-ArcIdentityOptionalPropertyValue -InputObject $resolveConfiguration -PropertyName 'timeToResolve') -ne 'PT10M') {
         throw "Alert '$AlertName' does not preserve its deterministic evaluation and resolution timing."
     }
     if ($null -ne $ExpectedOverrideQueryTimeRange -and
@@ -364,7 +372,7 @@ Assert-ArcIdentityAlertRule `
     -ExpectedThreshold 1 `
     -ExpectedEvaluationFrequency 'PT5M' `
     -ExpectedWindowSize 'PT5M' `
-    -ExpectedOverrideQueryTimeRange 'PT20M'
+    -ExpectedOverrideQueryTimeRange 'PT30M'
 
 $sreIdentity = Invoke-ArcIdentityAzJson `
     -Arguments @(
