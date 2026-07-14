@@ -201,59 +201,93 @@ if (-not (Test-Path -LiteralPath $templateFile -PathType Leaf)) {
     throw 'The Arc identity Bicep orchestration file was not found.'
 }
 
-$machineNamesJson = $MachineNames | ConvertTo-Json -Compress
-$deploymentParameters = @(
-    "arcResourceGroupName=$ArcResourceGroupName",
-    "location=$Location",
-    "workspaceResourceId=$workspaceResourceId",
-    "actionGroupResourceId=$actionGroupResourceId",
-    "targetMachineNames=$machineNamesJson",
-    "dataCollectionRuleName=$DataCollectionRuleName",
-    "dataCollectionRuleAssociationName=$AssociationName",
-    "tokenFailureAlertName=$TokenFailureAlertName",
-    "dataFreshnessAlertName=$DataFreshnessAlertName"
-)
-$whatIfName = "arc-identity-whatif-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
+$deploymentParameterFile = [System.IO.Path]::GetTempFileName()
+try {
+    $deploymentParameters = [ordered]@{
+        '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+        contentVersion = '1.0.0.0'
+        parameters = [ordered]@{
+            arcResourceGroupName = @{
+                value = $ArcResourceGroupName
+            }
+            location = @{
+                value = $Location
+            }
+            workspaceResourceId = @{
+                value = $workspaceResourceId
+            }
+            actionGroupResourceId = @{
+                value = $actionGroupResourceId
+            }
+            targetMachineNames = @{
+                value = @($MachineNames)
+            }
+            dataCollectionRuleName = @{
+                value = $DataCollectionRuleName
+            }
+            dataCollectionRuleAssociationName = @{
+                value = $AssociationName
+            }
+            tokenFailureAlertName = @{
+                value = $TokenFailureAlertName
+            }
+            dataFreshnessAlertName = @{
+                value = $DataFreshnessAlertName
+            }
+        }
+    }
+    $deploymentParametersJson = $deploymentParameters | ConvertTo-Json -Depth 10
+    [System.IO.File]::WriteAllText(
+        $deploymentParameterFile,
+        $deploymentParametersJson,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    $deploymentParameterFileArgument = "@$([System.IO.Path]::GetFullPath($deploymentParameterFile))"
+    $whatIfName = "arc-identity-whatif-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
 
-& az deployment sub what-if `
-    --subscription $SubscriptionId `
-    --location $Location `
-    --name $whatIfName `
-    --template-file $templateFile `
-    --parameters @deploymentParameters `
-    --result-format FullResourcePayloads
-if ($LASTEXITCODE -ne 0) {
-    throw 'Arc identity subscription deployment what-if failed.'
-}
+    & az deployment sub what-if `
+        --subscription $SubscriptionId `
+        --location $Location `
+        --name $whatIfName `
+        --template-file $templateFile `
+        --parameters $deploymentParameterFileArgument `
+        --result-format FullResourcePayloads
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Arc identity subscription deployment what-if failed.'
+    }
 
-if (-not $Apply) {
-    Write-Host 'What-if completed. No Azure resources were changed. Rerun with -Apply after reviewing the result.'
-    return
-}
-if (-not $PSCmdlet.ShouldProcess(
-        "$SubscriptionId/$ArcResourceGroupName",
-        'Create or update only the dedicated Arc identity DCR, two associations, and two alert rules'
-    )) {
-    return
-}
+    if (-not $Apply) {
+        Write-Host 'What-if completed. No Azure resources were changed. Rerun with -Apply after reviewing the result.'
+        return
+    }
+    if (-not $PSCmdlet.ShouldProcess(
+            "$SubscriptionId/$ArcResourceGroupName",
+            'Create or update only the dedicated Arc identity DCR, two associations, and two alert rules'
+        )) {
+        return
+    }
 
-$deploymentName = "arc-identity-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
-$createArguments = @(
-    'deployment', 'sub', 'create',
-    '--subscription', $SubscriptionId,
-    '--location', $Location,
-    '--name', $deploymentName,
-    '--template-file', $templateFile,
-    '--parameters'
-) + $deploymentParameters + @(
-    '--output', 'json'
-)
-$deployment = Invoke-ArcIdentityAzJson `
-    -Arguments $createArguments `
-    -FailureMessage 'Arc identity subscription deployment failed.'
-if ($deployment.properties.provisioningState -ne 'Succeeded') {
-    throw "Arc identity deployment finished as '$($deployment.properties.provisioningState)'."
-}
+    $deploymentName = "arc-identity-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss'))"
+    $createArguments = @(
+        'deployment', 'sub', 'create',
+        '--subscription', $SubscriptionId,
+        '--location', $Location,
+        '--name', $deploymentName,
+        '--template-file', $templateFile,
+        '--parameters', $deploymentParameterFileArgument,
+        '--output', 'json'
+    )
+    $deployment = Invoke-ArcIdentityAzJson `
+        -Arguments $createArguments `
+        -FailureMessage 'Arc identity subscription deployment failed.'
+    if ($deployment.properties.provisioningState -ne 'Succeeded') {
+        throw "Arc identity deployment finished as '$($deployment.properties.provisioningState)'."
+    }
 
-Write-Host "Additive Arc identity infrastructure deployed as '$deploymentName'."
-Write-Host 'Run configure-arc-identity-sre-agent.ps1 and then verify-arc-identity.ps1.'
+    Write-Host "Additive Arc identity infrastructure deployed as '$deploymentName'."
+    Write-Host 'Run configure-arc-identity-sre-agent.ps1 and then verify-arc-identity.ps1.'
+} finally {
+    if (Test-Path -LiteralPath $deploymentParameterFile -PathType Leaf) {
+        Remove-Item -LiteralPath $deploymentParameterFile -Force
+    }
+}

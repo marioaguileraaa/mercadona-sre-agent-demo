@@ -79,6 +79,218 @@ function ConvertTo-CanonicalJson {
     return ConvertTo-Json -InputObject $Value -Compress
 }
 
+function Invoke-ArcIdentityDeploymentParameterProbe {
+    param(
+        [Parameter(Mandatory)]
+        [string] $DeployScriptPath,
+        [switch] $Apply,
+        [switch] $FailWhatIf
+    )
+
+    $subscriptionId = '11111111-2222-3333-4444-555555555555'
+    $tenantId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    $arcResourceGroupName = 'rg-arc-parameter-probe'
+    $sreResourceGroupName = 'rg-sre-parameter-probe'
+    $location = 'northeurope'
+    $workspaceName = 'law-parameter-probe'
+    $actionGroupName = 'ag-parameter-probe'
+    $machineNames = @('ArcBox-Quoted-"One"', 'ArcBox-Comma,Two')
+    $dataCollectionRuleName = 'dcr-parameter-probe'
+    $associationName = 'assoc-parameter-probe'
+    $existingVmInsightsDcrName = 'existing-vm-insights-probe'
+    $tokenFailureAlertName = 'alert-token-parameter-probe'
+    $dataFreshnessAlertName = 'alert-freshness-parameter-probe'
+    $deploymentCalls = [System.Collections.Generic.List[object]]::new()
+
+    function Get-FakeAzArgumentValue {
+        param(
+            [Parameter(Mandatory)]
+            [string[]] $Arguments,
+            [Parameter(Mandatory)]
+            [string] $Name
+        )
+
+        $index = [Array]::IndexOf($Arguments, $Name)
+        if ($index -lt 0 -or $index -ge ($Arguments.Count - 1)) {
+            throw "Fake Azure CLI call did not include '$Name'."
+        }
+        return $Arguments[$index + 1]
+    }
+
+    function ConvertTo-FakeAzJson {
+        param(
+            [Parameter(Mandatory)]
+            [object] $InputObject
+        )
+
+        return ConvertTo-Json -InputObject $InputObject -Depth 20 -Compress
+    }
+
+    function az {
+        [string[]] $azArguments = @($args | ForEach-Object { [string] $_ })
+        $global:LASTEXITCODE = 0
+
+        if ($azArguments[0] -eq 'account' -and $azArguments[1] -eq 'show') {
+            return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                    id = $subscriptionId
+                    tenantId = $tenantId
+                    name = 'Synthetic parameter probe'
+                })
+        }
+        if ($azArguments[0] -eq 'group' -and $azArguments[1] -eq 'show') {
+            return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                    name = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--name'
+                })
+        }
+        if ($azArguments[0] -eq 'connectedmachine' -and $azArguments[1] -eq 'list') {
+            $machines = foreach ($machineName in $machineNames) {
+                [ordered]@{
+                    name = $machineName
+                    location = $location
+                    properties = [ordered]@{
+                        status = 'Connected'
+                        osType = 'Windows'
+                    }
+                }
+            }
+            return ConvertTo-FakeAzJson -InputObject @($machines)
+        }
+        if ($azArguments[0] -eq 'connectedmachine' -and
+            $azArguments[1] -eq 'extension' -and
+            $azArguments[2] -eq 'show') {
+            return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                    properties = [ordered]@{
+                        provisioningState = 'Succeeded'
+                    }
+                })
+        }
+        if ($azArguments[0] -eq 'monitor' -and
+            $azArguments[1] -eq 'log-analytics' -and
+            $azArguments[2] -eq 'workspace' -and
+            $azArguments[3] -eq 'show') {
+            return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                    id = "/subscriptions/$subscriptionId/resourceGroups/$arcResourceGroupName/providers/Microsoft.OperationalInsights/workspaces/$workspaceName"
+                })
+        }
+        if ($azArguments[0] -eq 'monitor' -and
+            $azArguments[1] -eq 'action-group' -and
+            $azArguments[2] -eq 'show') {
+            return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                    id = "/subscriptions/$subscriptionId/resourceGroups/$sreResourceGroupName/providers/Microsoft.Insights/actionGroups/$actionGroupName"
+                })
+        }
+        if ($azArguments[0] -eq 'rest') {
+            $url = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--url'
+            if ($url -like '*dataCollectionRuleAssociations*') {
+                return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                        value = @(
+                            [ordered]@{
+                                name = $existingVmInsightsDcrName
+                                properties = [ordered]@{
+                                    dataCollectionRuleId = "/subscriptions/$subscriptionId/resourceGroups/$arcResourceGroupName/providers/Microsoft.Insights/dataCollectionRules/$existingVmInsightsDcrName"
+                                }
+                            }
+                        )
+                    })
+            }
+            if ($url -like '*dataCollectionRules?*' -or $url -like '*scheduledQueryRules?*') {
+                return ConvertTo-FakeAzJson -InputObject ([ordered]@{ value = @() })
+            }
+        }
+        if ($azArguments[0] -eq 'deployment' -and $azArguments[1] -eq 'sub') {
+            $parameterIndexes = @(
+                for ($index = 0; $index -lt $azArguments.Count; $index++) {
+                    if ($azArguments[$index] -eq '--parameters') {
+                        $index
+                    }
+                }
+            )
+            if ($parameterIndexes.Count -ne 1) {
+                throw 'Deployment must pass exactly one --parameters argument.'
+            }
+            $parameterIndex = $parameterIndexes[0]
+            if ($parameterIndex -ge ($azArguments.Count - 1)) {
+                throw 'Deployment --parameters argument did not include a value.'
+            }
+            $parameterArgument = $azArguments[$parameterIndex + 1]
+            if (-not $parameterArgument.StartsWith('@', [StringComparison]::Ordinal)) {
+                throw "Deployment parameters were not passed as an @file argument: '$parameterArgument'."
+            }
+            $parameterPath = $parameterArgument.Substring(1)
+            if (-not [System.IO.Path]::IsPathFullyQualified($parameterPath)) {
+                throw "Deployment parameters path was not absolute: '$parameterPath'."
+            }
+            if (-not (Test-Path -LiteralPath $parameterPath -PathType Leaf)) {
+                throw "Deployment parameters file did not exist during the Azure CLI call: '$parameterPath'."
+            }
+            $parameterDocument = Get-Content -LiteralPath $parameterPath -Raw |
+                ConvertFrom-Json -AsHashtable -Depth 100
+            $deploymentCalls.Add([pscustomobject]@{
+                    Operation = $azArguments[2]
+                    ParameterArgument = $parameterArgument
+                    ParameterPath = $parameterPath
+                    ParameterDocument = $parameterDocument
+                })
+
+            if ($azArguments[2] -eq 'what-if') {
+                if ($FailWhatIf) {
+                    $global:LASTEXITCODE = 1
+                }
+                return
+            }
+            if ($azArguments[2] -eq 'create') {
+                return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                        properties = [ordered]@{
+                            provisioningState = 'Succeeded'
+                        }
+                    })
+            }
+        }
+
+        throw "Unexpected fake Azure CLI call: $($azArguments -join ' ')"
+    }
+
+    $errorMessage = $null
+    try {
+        & $DeployScriptPath `
+            -SubscriptionId $subscriptionId `
+            -TenantId $tenantId `
+            -ArcResourceGroupName $arcResourceGroupName `
+            -SreResourceGroupName $sreResourceGroupName `
+            -Location $location `
+            -WorkspaceName $workspaceName `
+            -ActionGroupName $actionGroupName `
+            -MachineNames $machineNames `
+            -DataCollectionRuleName $dataCollectionRuleName `
+            -AssociationName $associationName `
+            -ExistingVmInsightsDataCollectionRuleName $existingVmInsightsDcrName `
+            -TokenFailureAlertName $tokenFailureAlertName `
+            -DataFreshnessAlertName $dataFreshnessAlertName `
+            -Apply:$Apply `
+            -Confirm:$false 6>$null
+    } catch {
+        $errorMessage = $_.Exception.Message
+    } finally {
+        $global:LASTEXITCODE = 0
+    }
+
+    return [pscustomobject]@{
+        Calls = @($deploymentCalls)
+        ErrorMessage = $errorMessage
+        ExpectedParameters = [ordered]@{
+            arcResourceGroupName = $arcResourceGroupName
+            location = $location
+            workspaceResourceId = "/subscriptions/$subscriptionId/resourceGroups/$arcResourceGroupName/providers/Microsoft.OperationalInsights/workspaces/$workspaceName"
+            actionGroupResourceId = "/subscriptions/$subscriptionId/resourceGroups/$sreResourceGroupName/providers/Microsoft.Insights/actionGroups/$actionGroupName"
+            targetMachineNames = @($machineNames)
+            dataCollectionRuleName = $dataCollectionRuleName
+            dataCollectionRuleAssociationName = $associationName
+            tokenFailureAlertName = $tokenFailureAlertName
+            dataFreshnessAlertName = $dataFreshnessAlertName
+        }
+    }
+}
+
 $newScriptNames = @(
     'ArcIdentity.Common.ps1',
     'deploy-arc-identity.ps1',
@@ -260,6 +472,100 @@ Assert-True `
 Assert-Contains -Source $deploySource -Expected 'refusing to overwrite' -Case 'Collision refusal'
 Assert-Contains -Source $deploySource -Expected 'scheduledQueryRules?api-version=2023-12-01' -Case 'Alert collision preflight'
 Assert-Contains -Source $deploySource -Expected 'MSVMI-ama-vmi-default-dcr' -Case 'Existing VM Insights association preflight'
+Assert-Contains -Source $deploySource -Expected '[System.IO.Path]::GetTempFileName()' -Case 'Temporary deployment parameters file'
+Assert-Contains -Source $deploySource -Expected '--parameters $deploymentParameterFileArgument' -Case 'What-if parameter file argument'
+Assert-Contains -Source $deploySource -Expected "'--parameters', `$deploymentParameterFileArgument" -Case 'Create parameter file argument'
+Assert-NotMatches `
+    -Source $deploySource `
+    -Pattern 'targetMachineNames\s*=\s*\$machineNamesJson|targetMachineNames=\$machineNamesJson|--parameters\s+@deploymentParameters' `
+    -Case 'No inline native deployment parameter JSON'
+
+$deployScriptPath = Join-Path $PSScriptRoot 'deploy-arc-identity.ps1'
+$deployTokens = $null
+$deployParseErrors = $null
+$deployAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $deployScriptPath,
+    [ref] $deployTokens,
+    [ref] $deployParseErrors
+)
+$cleanupTryStatement = $deployAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.TryStatementAst] -and
+            $null -ne $node.Finally -and
+            $node.Body.Extent.Text.Contains('deployment sub what-if', [StringComparison]::Ordinal) -and
+            $node.Body.Extent.Text.Contains("'deployment', 'sub', 'create'", [StringComparison]::Ordinal) -and
+            $node.Finally.Extent.Text.Contains(
+                'Remove-Item -LiteralPath $deploymentParameterFile -Force',
+                [StringComparison]::Ordinal
+            )
+    }, $true)
+Assert-True -Condition ($null -ne $cleanupTryStatement) -Case 'Deployment parameter file cleanup in finally'
+
+$applyProbe = Invoke-ArcIdentityDeploymentParameterProbe -DeployScriptPath $deployScriptPath -Apply
+Assert-True -Condition ($null -eq $applyProbe.ErrorMessage) -Case 'Fake Azure CLI apply execution'
+$applyCalls = @($applyProbe.Calls)
+Assert-True -Condition ($applyCalls.Count -eq 2) -Case 'What-if and create fake Azure CLI calls'
+Assert-True -Condition ($applyCalls[0].Operation -ceq 'what-if') -Case 'What-if remains first'
+Assert-True -Condition ($applyCalls[1].Operation -ceq 'create') -Case 'Create follows approved what-if'
+Assert-True `
+    -Condition ($applyCalls[0].ParameterArgument -ceq $applyCalls[1].ParameterArgument) `
+    -Case 'What-if and create share one parameter file argument'
+Assert-True `
+    -Condition ($applyCalls[0].ParameterPath -ceq $applyCalls[1].ParameterPath) `
+    -Case 'What-if and create share one parameter file path'
+Assert-True `
+    -Condition (-not (Test-Path -LiteralPath $applyCalls[0].ParameterPath)) `
+    -Case 'Apply parameter file cleanup'
+Assert-True `
+    -Condition (
+        (ConvertTo-CanonicalJson -Value $applyCalls[0].ParameterDocument) -ceq
+        (ConvertTo-CanonicalJson -Value $applyCalls[1].ParameterDocument)
+    ) `
+    -Case 'What-if and create share one parameter document'
+$applyParameterValues = $applyCalls[0].ParameterDocument['parameters']
+Assert-True `
+    -Condition (
+        $applyCalls[0].ParameterDocument['$schema'] -ceq
+        'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+    ) `
+    -Case 'ARM deployment parameters schema'
+Assert-True `
+    -Condition ($applyCalls[0].ParameterDocument['contentVersion'] -ceq '1.0.0.0') `
+    -Case 'ARM deployment parameters content version'
+foreach ($expectedParameter in $applyProbe.ExpectedParameters.GetEnumerator()) {
+    if ($expectedParameter.Key -eq 'targetMachineNames') {
+        $actualMachineNames = @($applyParameterValues[$expectedParameter.Key]['value'])
+        Assert-True `
+            -Condition (
+                ($actualMachineNames -join "`0") -ceq
+                (@($expectedParameter.Value) -join "`0")
+            ) `
+            -Case 'Deployment target machine JSON array shape'
+        continue
+    }
+    Assert-True `
+        -Condition ($applyParameterValues[$expectedParameter.Key]['value'] -ceq $expectedParameter.Value) `
+        -Case "Deployment parameter override: $($expectedParameter.Key)"
+}
+
+$planProbe = Invoke-ArcIdentityDeploymentParameterProbe -DeployScriptPath $deployScriptPath
+Assert-True -Condition ($null -eq $planProbe.ErrorMessage) -Case 'Fake Azure CLI plan execution'
+$planCalls = @($planProbe.Calls)
+Assert-True -Condition ($planCalls.Count -eq 1) -Case 'Plan mode invokes only what-if'
+Assert-True -Condition ($planCalls[0].Operation -ceq 'what-if') -Case 'Plan mode has no create'
+Assert-True `
+    -Condition (-not (Test-Path -LiteralPath $planCalls[0].ParameterPath)) `
+    -Case 'Plan parameter file cleanup'
+
+$failureProbe = Invoke-ArcIdentityDeploymentParameterProbe -DeployScriptPath $deployScriptPath -FailWhatIf
+$failureCalls = @($failureProbe.Calls)
+Assert-True `
+    -Condition ($failureProbe.ErrorMessage -ceq 'Arc identity subscription deployment what-if failed.') `
+    -Case 'What-if failure propagation'
+Assert-True -Condition ($failureCalls.Count -eq 1) -Case 'Failed what-if prevents create'
+Assert-True `
+    -Condition (-not (Test-Path -LiteralPath $failureCalls[0].ParameterPath)) `
+    -Case 'Failed what-if parameter file cleanup'
 
 $incidentSource = $scriptSources['start-arc-identity-incident.ps1']
 $recoverySource = $scriptSources['recover-arc-identity-incident.ps1']
