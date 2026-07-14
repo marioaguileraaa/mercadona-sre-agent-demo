@@ -291,6 +291,168 @@ function Invoke-ArcIdentityDeploymentParameterProbe {
     }
 }
 
+function Invoke-ArcIdentityArmRestBodyProbe {
+    $subscriptionId = '11111111-2222-3333-4444-555555555555'
+    $existingManagedResourceId = "/subscriptions/$subscriptionId/resourceGroups/rg-existing-sre"
+    $arcResourceGroupId = "/subscriptions/$subscriptionId/resourceGroups/rg-arcbox-itpro-weu-002"
+    $workspaceName = 'arcbox-log-analytics'
+    $workspaceResourceId = "$arcResourceGroupId/providers/Microsoft.OperationalInsights/workspaces/$workspaceName"
+    $sreIdentityResourceId = "/subscriptions/$subscriptionId/resourceGroups/rg-existing-sre/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-sre-agent"
+    $agentResourceId = "/subscriptions/$subscriptionId/resourceGroups/rg-existing-sre/providers/Microsoft.App/agents/sre-agent"
+    $knowledgeGraphUrl = "https://management.azure.com${agentResourceId}?api-version=2025-05-01-preview"
+    $connectorUrl = "https://management.azure.com${agentResourceId}/connectors/arcbox-log-analytics?api-version=2025-05-01-preview"
+    $failureUrl = "https://management.azure.com${agentResourceId}/forced-failure?api-version=2025-05-01-preview"
+    $knowledgeGraphBody = [ordered]@{
+        properties = [ordered]@{
+            knowledgeGraphConfiguration = [ordered]@{
+                identity = $sreIdentityResourceId
+                managedResources = @(
+                    $existingManagedResourceId,
+                    $arcResourceGroupId
+                )
+            }
+        }
+    }
+    $connectorBody = [ordered]@{
+        properties = [ordered]@{
+            dataConnectorType = 'LogAnalytics'
+            dataSource = $workspaceResourceId
+            extendedProperties = [ordered]@{
+                armResourceId = $workspaceResourceId
+                resource = [ordered]@{
+                    name = $workspaceName
+                }
+            }
+            identity = $sreIdentityResourceId
+        }
+    }
+    $calls = [System.Collections.Generic.List[object]]::new()
+
+    function Get-FakeAzArgumentValue {
+        param(
+            [Parameter(Mandatory)]
+            [string[]] $Arguments,
+            [Parameter(Mandatory)]
+            [string] $Name
+        )
+
+        $index = [Array]::IndexOf($Arguments, $Name)
+        if ($index -lt 0 -or $index -ge ($Arguments.Count - 1)) {
+            throw "Fake Azure CLI call did not include '$Name'."
+        }
+        return $Arguments[$index + 1]
+    }
+
+    function az {
+        [string[]] $azArguments = @($args | ForEach-Object { [string] $_ })
+        $global:LASTEXITCODE = 0
+        if ($azArguments.Count -eq 0 -or $azArguments[0] -cne 'rest') {
+            throw "Unexpected fake Azure CLI call: $($azArguments -join ' ')"
+        }
+
+        $bodyIndexes = @(
+            for ($index = 0; $index -lt $azArguments.Count; $index++) {
+                if ($azArguments[$index] -ceq '--body') {
+                    $index
+                }
+            }
+        )
+        if ($bodyIndexes.Count -ne 1) {
+            throw 'ARM REST must pass exactly one --body argument.'
+        }
+        $bodyIndex = $bodyIndexes[0]
+        if ($bodyIndex -ge ($azArguments.Count - 1)) {
+            throw 'ARM REST --body did not include a value.'
+        }
+        $bodyArgument = $azArguments[$bodyIndex + 1]
+        if (-not $bodyArgument.StartsWith('@', [StringComparison]::Ordinal)) {
+            throw "ARM REST body was not passed as an @file argument: '$bodyArgument'."
+        }
+        $bodyPath = $bodyArgument.Substring(1)
+        if (-not [System.IO.Path]::IsPathFullyQualified($bodyPath)) {
+            throw "ARM REST body path was not absolute: '$bodyPath'."
+        }
+        if (-not (Test-Path -LiteralPath $bodyPath -PathType Leaf)) {
+            throw "ARM REST body file did not exist during the Azure CLI call: '$bodyPath'."
+        }
+
+        $bodyBytes = [System.IO.File]::ReadAllBytes($bodyPath)
+        $hasUtf8Bom = $bodyBytes.Count -ge 3 -and
+            $bodyBytes[0] -eq 0xEF -and
+            $bodyBytes[1] -eq 0xBB -and
+            $bodyBytes[2] -eq 0xBF
+        $bodyText = [System.Text.UTF8Encoding]::new($false, $true).GetString($bodyBytes)
+        $bodyDocument = $bodyText | ConvertFrom-Json -AsHashtable -Depth 100
+        $url = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--url'
+        $calls.Add([pscustomobject]@{
+                Arguments = [string[]] $azArguments.Clone()
+                Method = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--method'
+                Url = $url
+                Header = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--headers'
+                Output = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--output'
+                BodyArgument = $bodyArgument
+                BodyPath = $bodyPath
+                BodyDocument = $bodyDocument
+                HasUtf8Bom = $hasUtf8Bom
+            })
+
+        if ($url -ceq $failureUrl) {
+            $global:LASTEXITCODE = 1
+        }
+    }
+
+    $knowledgeGraphOutput = @(
+        Invoke-ArcIdentityArmRestWithJsonBody `
+            -Method 'patch' `
+            -Url $knowledgeGraphUrl `
+            -Headers @('Content-Type=application/json') `
+            -Body $knowledgeGraphBody `
+            -Output 'none' `
+            -FailureMessage 'Unable to add the ArcBox resource group to SRE Agent managed resources.' *>&1
+    )
+    $connectorBodyJson = ConvertTo-Json -InputObject $connectorBody -Depth 10 -Compress
+    $connectorOutput = @(
+        Invoke-ArcIdentityArmRestWithJsonBody `
+            -Method 'put' `
+            -Url $connectorUrl `
+            -Headers @('Content-Type=application/json') `
+            -Body $connectorBodyJson `
+            -Output 'none' `
+            -FailureMessage 'Unable to configure the additive ArcBox Log Analytics connector.' *>&1
+    )
+
+    $failureMessage = $null
+    try {
+        Invoke-ArcIdentityArmRestWithJsonBody `
+            -Method 'patch' `
+            -Url $failureUrl `
+            -Headers @('Content-Type=application/json') `
+            -Body $knowledgeGraphBody `
+            -Output 'none' `
+            -FailureMessage 'Unable to add the ArcBox resource group to SRE Agent managed resources.'
+    } catch {
+        $failureMessage = $_.Exception.Message
+    } finally {
+        $global:LASTEXITCODE = 0
+    }
+
+    return [pscustomobject]@{
+        Calls = @($calls)
+        SuccessOutput = @($knowledgeGraphOutput) + @($connectorOutput)
+        FailureMessage = $failureMessage
+        KnowledgeGraphUrl = $knowledgeGraphUrl
+        ConnectorUrl = $connectorUrl
+        FailureUrl = $failureUrl
+        ExpectedKnowledgeGraphBody = $knowledgeGraphBody
+        ExpectedConnectorBody = $connectorBody
+        ExistingManagedResourceId = $existingManagedResourceId
+        ArcResourceGroupId = $arcResourceGroupId
+        WorkspaceName = $workspaceName
+        WorkspaceResourceId = $workspaceResourceId
+        SreIdentityResourceId = $sreIdentityResourceId
+    }
+}
+
 $newScriptNames = @(
     'ArcIdentity.Common.ps1',
     'deploy-arc-identity.ps1',
@@ -394,6 +556,112 @@ $wrappedItems = '{"value":[{"name":"one"},{"name":"two"}]}' | ConvertFrom-Json
 $responseItems = @(Get-ArcIdentityResponseItems -Response $wrappedItems)
 Assert-True -Condition ($responseItems.Count -eq 2) -Case 'Wrapped Azure list response'
 Assert-True -Condition ($responseItems[1].name -eq 'two') -Case 'Wrapped Azure list item shape'
+
+$armRestBodyProbe = Invoke-ArcIdentityArmRestBodyProbe
+$armRestCalls = @($armRestBodyProbe.Calls)
+Assert-True -Condition ($armRestCalls.Count -eq 3) -Case 'Two successful and one failed ARM body calls'
+Assert-True -Condition ($armRestBodyProbe.SuccessOutput.Count -eq 0) -Case 'ARM request bodies are not emitted'
+Assert-True `
+    -Condition (
+        $armRestBodyProbe.FailureMessage -ceq
+        'Unable to add the ArcBox resource group to SRE Agent managed resources.'
+    ) `
+    -Case 'ARM helper preserves the caller-specific failure message'
+Assert-True `
+    -Condition ((@($armRestCalls.BodyPath | Sort-Object -Unique)).Count -eq 3) `
+    -Case 'ARM calls use separate temporary body files'
+foreach ($armRestCall in $armRestCalls) {
+    $bodyArgumentIndexes = @(
+        for ($index = 0; $index -lt $armRestCall.Arguments.Count; $index++) {
+            if ($armRestCall.Arguments[$index] -ceq '--body') {
+                $index
+            }
+        }
+    )
+    Assert-True -Condition ($bodyArgumentIndexes.Count -eq 1) -Case 'Single ARM --body option'
+    Assert-True `
+        -Condition ($armRestCall.BodyArgument -ceq "@$($armRestCall.BodyPath)") `
+        -Case 'ARM --body is exactly one @file argument'
+    Assert-True `
+        -Condition ([System.IO.Path]::IsPathFullyQualified($armRestCall.BodyPath)) `
+        -Case 'ARM body file path is absolute'
+    Assert-True -Condition (-not $armRestCall.HasUtf8Bom) -Case 'ARM body file is UTF-8 without BOM'
+    Assert-True `
+        -Condition (-not (Test-Path -LiteralPath $armRestCall.BodyPath)) `
+        -Case 'ARM body file cleanup after Azure CLI returns'
+    Assert-True `
+        -Condition ($armRestCall.Header -ceq 'Content-Type=application/json') `
+        -Case 'ARM content-type header is preserved'
+    Assert-True -Condition ($armRestCall.Output -ceq 'none') -Case 'ARM output mode is preserved'
+    Assert-True `
+        -Condition (
+            @($armRestCall.Arguments | Where-Object {
+                    $_.TrimStart().StartsWith('{', [StringComparison]::Ordinal) -or
+                    $_.TrimStart().StartsWith('[', [StringComparison]::Ordinal)
+                }).Count -eq 0
+        ) `
+        -Case 'No inline JSON remains in Azure CLI arguments'
+}
+Assert-True -Condition ($armRestCalls[0].Method -ceq 'patch') -Case 'Knowledge graph PATCH method'
+Assert-True `
+    -Condition ($armRestCalls[0].Url -ceq $armRestBodyProbe.KnowledgeGraphUrl) `
+    -Case 'Knowledge graph PATCH URL'
+Assert-True `
+    -Condition (
+        (ConvertTo-CanonicalJson -Value $armRestCalls[0].BodyDocument) -ceq
+        (ConvertTo-CanonicalJson -Value $armRestBodyProbe.ExpectedKnowledgeGraphBody)
+    ) `
+    -Case 'Exact managed resources union payload'
+$managedResources = @(
+    $armRestCalls[0].BodyDocument['properties']['knowledgeGraphConfiguration']['managedResources']
+)
+Assert-True `
+    -Condition (
+        ($managedResources -join "`0") -ceq
+        (@(
+                $armRestBodyProbe.ExistingManagedResourceId,
+                $armRestBodyProbe.ArcResourceGroupId
+            ) -join "`0")
+    ) `
+    -Case 'Existing and ArcBox managed resources are preserved in order'
+Assert-True -Condition ($armRestCalls[1].Method -ceq 'put') -Case 'Connector PUT method'
+Assert-True `
+    -Condition ($armRestCalls[1].Url -ceq $armRestBodyProbe.ConnectorUrl) `
+    -Case 'Connector PUT URL'
+Assert-True `
+    -Condition (
+        (ConvertTo-CanonicalJson -Value $armRestCalls[1].BodyDocument) -ceq
+        (ConvertTo-CanonicalJson -Value $armRestBodyProbe.ExpectedConnectorBody)
+    ) `
+    -Case 'Exact Log Analytics connector payload'
+$connectorProperties = $armRestCalls[1].BodyDocument['properties']
+Assert-True `
+    -Condition ($connectorProperties['dataConnectorType'] -ceq 'LogAnalytics') `
+    -Case 'Connector remains LogAnalytics'
+Assert-True `
+    -Condition ($connectorProperties['dataSource'] -ceq $armRestBodyProbe.WorkspaceResourceId) `
+    -Case 'Connector exact workspace data source'
+Assert-True `
+    -Condition ($connectorProperties['identity'] -ceq $armRestBodyProbe.SreIdentityResourceId) `
+    -Case 'Connector exact managed identity'
+Assert-True `
+    -Condition (
+        (ConvertTo-CanonicalJson -Value $connectorProperties['extendedProperties']) -ceq
+        (ConvertTo-CanonicalJson -Value ([ordered]@{
+                    armResourceId = $armRestBodyProbe.WorkspaceResourceId
+                    resource = [ordered]@{
+                        name = $armRestBodyProbe.WorkspaceName
+                    }
+                }))
+    ) `
+    -Case 'Connector exact extended properties'
+Assert-True -Condition ($armRestCalls[2].Url -ceq $armRestBodyProbe.FailureUrl) -Case 'Forced failure call'
+Assert-True `
+    -Condition (
+        (ConvertTo-CanonicalJson -Value $armRestCalls[2].BodyDocument) -ceq
+        (ConvertTo-CanonicalJson -Value $armRestBodyProbe.ExpectedKnowledgeGraphBody)
+    ) `
+    -Case 'Failed ARM call receives the expected body file'
 
 $orchestrationPath = Join-Path $repoRoot 'infra\arc-identity.bicep'
 $modulePath = Join-Path $repoRoot 'infra\core\arc-identity-monitoring.bicep'
@@ -677,6 +945,39 @@ foreach ($destructivePattern in @(
 }
 
 $configureSource = $scriptSources['configure-arc-identity-sre-agent.ps1']
+$armRestHelperCallCount = [regex]::Matches(
+    $configureSource,
+    '(?m)^\s*Invoke-ArcIdentityArmRestWithJsonBody\s+`'
+).Count
+Assert-True -Condition ($armRestHelperCallCount -eq 2) -Case 'Exactly two ARM JSON helper call sites'
+Assert-Contains -Source $configureSource -Expected '-Body $knowledgeGraphPatch' -Case 'Knowledge graph helper body'
+Assert-Contains -Source $configureSource -Expected "-Method 'patch'" -Case 'Knowledge graph helper method'
+Assert-Contains -Source $configureSource -Expected '-Body $connectorBody' -Case 'Connector helper body'
+Assert-Contains -Source $configureSource -Expected "-Method 'put'" -Case 'Connector helper method'
+Assert-NotMatches `
+    -Source $configureSource `
+    -Pattern '(?m)^\s*[''"]?--body[''"]?\s*[, ]' `
+    -Case 'Configurator has no legacy inline Azure CLI body argument'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected 'function Invoke-ArcIdentityArmRestWithJsonBody' `
+    -Case 'Shared ARM JSON body helper'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected '[System.Text.UTF8Encoding]::new($false)' `
+    -Case 'ARM body UTF-8 without BOM'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected '$bodyFileArgument = "@$bodyFile"' `
+    -Case 'ARM body @file argument'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected 'Remove-Item -LiteralPath $bodyFile -Force' `
+    -Case 'ARM body file cleanup'
+Assert-NotMatches `
+    -Source $commonSource `
+    -Pattern '(?i)Write-(?:Host|Output|Verbose|Debug|Information|Warning)[^\r\n]*(?:bodyJson|\$Body)' `
+    -Case 'ARM helper does not print request bodies'
 foreach ($requiredContract in @(
         'identity-infrastructure-analyzer',
         'identity-infrastructure-operations',

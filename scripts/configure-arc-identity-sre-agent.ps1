@@ -294,16 +294,13 @@ $knowledgeGraphPatch = @{
             managedResources = $managedResources.ToArray()
         }
     }
-} | ConvertTo-Json -Depth 10 -Compress
-Invoke-ArcIdentityAzNoOutput `
-    -Arguments @(
-        'rest',
-        '--method', 'patch',
-        '--url', "https://management.azure.com${agentResourceId}?api-version=$previewApiVersion",
-        '--headers', 'Content-Type=application/json',
-        '--body', $knowledgeGraphPatch,
-        '--output', 'none'
-    ) `
+}
+Invoke-ArcIdentityArmRestWithJsonBody `
+    -Method 'patch' `
+    -Url "https://management.azure.com${agentResourceId}?api-version=$previewApiVersion" `
+    -Headers @('Content-Type=application/json') `
+    -Body $knowledgeGraphPatch `
+    -Output 'none' `
     -FailureMessage 'Unable to add the ArcBox resource group to SRE Agent managed resources.'
 
 $connectorBody = @{
@@ -318,17 +315,14 @@ $connectorBody = @{
         }
         identity = $sreIdentityResourceId
     }
-} | ConvertTo-Json -Depth 10 -Compress
+}
 if ($null -eq $existingConnector) {
-    Invoke-ArcIdentityAzNoOutput `
-        -Arguments @(
-            'rest',
-            '--method', 'put',
-            '--url', "https://management.azure.com${agentResourceId}/connectors/${connectorName}?api-version=$previewApiVersion",
-            '--headers', 'Content-Type=application/json',
-            '--body', $connectorBody,
-            '--output', 'none'
-        ) `
+    Invoke-ArcIdentityArmRestWithJsonBody `
+        -Method 'put' `
+        -Url "https://management.azure.com${agentResourceId}/connectors/${connectorName}?api-version=$previewApiVersion" `
+        -Headers @('Content-Type=application/json') `
+        -Body $connectorBody `
+        -Output 'none' `
         -FailureMessage 'Unable to configure the additive ArcBox Log Analytics connector.'
 } else {
     Write-Host "Reusing existing exact-scope connector '$connectorName'."
