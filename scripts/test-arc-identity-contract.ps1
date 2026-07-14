@@ -349,12 +349,16 @@ Assert-Contains -Source $configureSource -Expected "-PropertyName 'mode') -ne 'R
 Assert-Contains -Source $configureSource -Expected "-PropertyName 'accessLevel') -ne 'Low'" -Case 'Low access preflight'
 Assert-Contains -Source $configureSource -Expected 'refusing to overwrite it' -Case 'SRE resource collision refusal'
 Assert-Contains -Source $configureSource -Expected 'Perf table is expected' -Case 'SRE instructions preserve existing InsightsMetrics source'
+Assert-Contains -Source $configureSource -Expected "dataConnectorType = 'Kusto'" -Case 'Log Analytics connector body uses documented Kusto type'
+Assert-Contains -Source $configureSource -Expected "-PropertyName 'dataConnectorType') -ne 'Kusto'" -Case 'Existing connector readback validates documented Kusto type'
+Assert-NotMatches -Source $configureSource -Pattern "dataConnectorType\s*=\s*'LogAnalytics'|-PropertyName 'dataConnectorType'\) -ne 'LogAnalytics'" -Case 'No invalid LogAnalytics connector discriminator'
 $retailConfigureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'configure-sre-agent.ps1') -Raw
 Assert-Contains -Source $retailConfigureSource -Expected "titleContains = 'mercadona'" -Case 'Existing retail filter baseline'
 Assert-NotMatches -Source $configureSource -Pattern "titleContains\s*=\s*'mercadona'" -Case 'Identity filter does not overlap retail namespace'
 Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected '$freshnessLookbackMinutes = $MaximumIngestionAgeMinutes + 5' -Case 'Verification lookback follows accepted freshness threshold'
 Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected 'MSVMI-ama-vmi-default-dcr' -Case 'Verification preserves existing VM Insights DCR'
 Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected 'no duplicate performance-counter source' -Case 'Verification rejects duplicate counters'
+Assert-Contains -Source $scriptSources['verify-arc-identity.ps1'] -Expected "-PropertyName 'dataConnectorType') -ne 'Kusto'" -Case 'Deployment verification validates documented Kusto connector type'
 
 $kqlDirectory = Join-Path $repoRoot 'kql\arc-identity'
 $requiredKqlFiles = @(

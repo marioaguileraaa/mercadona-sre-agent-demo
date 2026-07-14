@@ -190,7 +190,7 @@ if ($null -ne $existingConnector) {
         -PropertyName 'properties'
     if ((Get-ArcIdentityOptionalPropertyValue `
                 -InputObject $existingConnectorProperties `
-                -PropertyName 'dataConnectorType') -ne 'LogAnalytics' -or
+                -PropertyName 'dataConnectorType') -ne 'Kusto' -or
         -not [string]::Equals(
             [string] (
                 Get-ArcIdentityOptionalPropertyValue `
@@ -308,7 +308,7 @@ Invoke-ArcIdentityAzNoOutput `
 
 $connectorBody = @{
     properties = @{
-        dataConnectorType = 'LogAnalytics'
+        dataConnectorType = 'Kusto'
         dataSource = $workspaceResourceId
         extendedProperties = @{
             armResourceId = $workspaceResourceId

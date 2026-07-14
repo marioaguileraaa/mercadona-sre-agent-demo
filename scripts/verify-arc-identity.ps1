@@ -445,7 +445,10 @@ $connector = Invoke-ArcIdentityAzJson `
 $connectorProperties = Get-ArcIdentityOptionalPropertyValue `
     -InputObject $connector `
     -PropertyName 'properties'
-if (-not [string]::Equals(
+if ((Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $connectorProperties `
+            -PropertyName 'dataConnectorType') -ne 'Kusto' -or
+    -not [string]::Equals(
         [string] (
             Get-ArcIdentityOptionalPropertyValue `
                 -InputObject $connectorProperties `
@@ -463,7 +466,7 @@ if (-not [string]::Equals(
         $sreIdentityResourceId,
         [StringComparison]::OrdinalIgnoreCase
     )) {
-    throw 'The ArcBox Log Analytics connector is not scoped to the expected workspace and UAMI.'
+    throw 'The ArcBox Log Analytics connector does not use the documented Kusto type or the expected workspace and UAMI.'
 }
 
 try {

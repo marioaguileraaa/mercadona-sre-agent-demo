@@ -109,7 +109,7 @@ No se ingiere de forma amplia el canal Security. Los principales controles de co
 
 - Reader y Monitoring Reader en el resource group ArcBox;
 - Log Analytics Reader solo en `law-arcbox-demo-001`;
-- conector LAW `arcbox-log-analytics` con `id-mercadona-sre-v1`;
+- conector LAW `arcbox-log-analytics` con `id-mercadona-sre-v1`; la API ARM usa el discriminador documentado `dataConnectorType=Kusto` también para Log Analytics;
 - subagente `identity-infrastructure-analyzer`;
 - skill `identity-infrastructure-operations` y herramientas de lectura;
 - filtro `identity-infrastructure-sev2` para Sev2;
