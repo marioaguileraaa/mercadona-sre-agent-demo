@@ -465,6 +465,11 @@ Heartbeat
 "@
     $singleRowQuery = "$successQuery`n| take 1"
     $emptyRowsQuery = "$successQuery`n| where false"
+    $missingPrimaryQuery = "$successQuery`n| extend ProbeShape = `"MissingPrimary`""
+    $multiplePrimaryQuery = "$successQuery`n| extend ProbeShape = `"MultiplePrimary`""
+    $unexpectedPrimaryQuery = "$successQuery`n| extend ProbeShape = `"UnexpectedPrimary`""
+    $malformedPrimaryQuery = "$successQuery`n| extend ProbeShape = `"MalformedPrimary`""
+    $duplicateColumnsQuery = "$successQuery`n| extend ProbeShape = `"DuplicateColumns`""
     $failureQuery = "$successQuery`n| where ResourceId != `"$firstResourceId`""
     $calls = [System.Collections.Generic.List[object]]::new()
 
@@ -541,12 +546,69 @@ Heartbeat
             $global:LASTEXITCODE = 1
             return
         }
+        $probeColumns = @(
+            [ordered]@{ name = 'ResourceId'; type = 'string' },
+            [ordered]@{ name = 'Healthy'; type = 'bool' },
+            [ordered]@{ name = 'HeartbeatFresh'; type = 'bool' },
+            [ordered]@{ name = 'EventCount'; type = 'long' },
+            [ordered]@{ name = 'MachineCount'; type = 'long' },
+            [ordered]@{ name = 'RecoveryEvents'; type = 'long' }
+        )
+        $emptyPrimaryTable = [ordered]@{
+            name = 'PrimaryResult'
+            columns = $probeColumns
+            rows = @()
+        }
+        if ($bodyDocument['query'] -ceq $missingPrimaryQuery) {
+            return ConvertTo-Json -InputObject ([ordered]@{ tables = @() }) -Depth 10 -Compress
+        }
+        if ($bodyDocument['query'] -ceq $multiplePrimaryQuery) {
+            return ConvertTo-Json -InputObject ([ordered]@{
+                    tables = @($emptyPrimaryTable, $emptyPrimaryTable)
+                }) -Depth 10 -Compress
+        }
+        if ($bodyDocument['query'] -ceq $unexpectedPrimaryQuery) {
+            return ConvertTo-Json -InputObject ([ordered]@{
+                    tables = @(
+                        [ordered]@{
+                            name = 'SecondaryResult'
+                            columns = $probeColumns
+                            rows = @()
+                        }
+                    )
+                }) -Depth 10 -Compress
+        }
+        if ($bodyDocument['query'] -ceq $malformedPrimaryQuery) {
+            return ConvertTo-Json -InputObject ([ordered]@{
+                    tables = @(
+                        [ordered]@{
+                            name = 'PrimaryResult'
+                            columns = @()
+                            rows = @()
+                        }
+                    )
+                }) -Depth 10 -Compress
+        }
+        if ($bodyDocument['query'] -ceq $duplicateColumnsQuery) {
+            return ConvertTo-Json -InputObject ([ordered]@{
+                    tables = @(
+                        [ordered]@{
+                            name = 'PrimaryResult'
+                            columns = @(
+                                [ordered]@{ name = 'ResourceId'; type = 'string' },
+                                [ordered]@{ name = 'ResourceId'; type = 'string' }
+                            )
+                            rows = @()
+                        }
+                    )
+                }) -Depth 10 -Compress
+        }
         $responseRows = [System.Collections.Generic.List[object]]::new()
         if ($bodyDocument['query'] -ceq $successQuery) {
-            $responseRows.Add([object[]]@($firstResourceId, $true))
-            $responseRows.Add([object[]]@($secondResourceId, $false))
+            $responseRows.Add([object[]]@($firstResourceId, $true, $true, 8, 2, 2))
+            $responseRows.Add([object[]]@($secondResourceId, $false, $false, 4, 1, 1))
         } elseif ($bodyDocument['query'] -ceq $singleRowQuery) {
-            $responseRows.Add([object[]]@($firstResourceId, $true))
+            $responseRows.Add([object[]]@($firstResourceId, $true, $true, 8, 2, 2))
         } elseif ($bodyDocument['query'] -cne $emptyRowsQuery) {
             throw 'Fake Azure CLI received an unexpected Log Analytics query.'
         }
@@ -554,10 +616,7 @@ Heartbeat
                 tables = @(
                     [ordered]@{
                         name = 'PrimaryResult'
-                        columns = @(
-                            [ordered]@{ name = 'ResourceId'; type = 'string' },
-                            [ordered]@{ name = 'Healthy'; type = 'bool' }
-                        )
+                        columns = $probeColumns
                         rows = $responseRows.ToArray()
                     }
                 )
@@ -582,6 +641,24 @@ Heartbeat
             -WorkspaceCustomerId $workspaceCustomerId `
             -Query $emptyRowsQuery
     )
+    $shapeErrors = [ordered]@{}
+    foreach ($shapeCase in @(
+            [pscustomobject]@{ Name = 'MissingPrimary'; Query = $missingPrimaryQuery },
+            [pscustomobject]@{ Name = 'MultiplePrimary'; Query = $multiplePrimaryQuery },
+            [pscustomobject]@{ Name = 'UnexpectedPrimary'; Query = $unexpectedPrimaryQuery },
+            [pscustomobject]@{ Name = 'MalformedPrimary'; Query = $malformedPrimaryQuery },
+            [pscustomobject]@{ Name = 'DuplicateColumns'; Query = $duplicateColumnsQuery }
+        )) {
+        try {
+            $null = Invoke-ArcIdentityLogAnalyticsQuery `
+                -SubscriptionId $subscriptionId `
+                -WorkspaceCustomerId $workspaceCustomerId `
+                -Query $shapeCase.Query
+            $shapeErrors[$shapeCase.Name] = $null
+        } catch {
+            $shapeErrors[$shapeCase.Name] = $_.Exception.Message
+        }
+    }
     $failureMessage = $null
     try {
         Invoke-ArcIdentityLogAnalyticsQuery `
@@ -599,12 +676,18 @@ Heartbeat
         SuccessRows = @($successRows)
         SingleRowRows = @($singleRowRows)
         EmptyRows = @($emptyRows)
+        ShapeErrors = [pscustomobject] $shapeErrors
         FailureMessage = $failureMessage
         SubscriptionId = $subscriptionId
         WorkspaceCustomerId = $workspaceCustomerId
         SuccessQuery = $successQuery
         SingleRowQuery = $singleRowQuery
         EmptyRowsQuery = $emptyRowsQuery
+        MissingPrimaryQuery = $missingPrimaryQuery
+        MultiplePrimaryQuery = $multiplePrimaryQuery
+        UnexpectedPrimaryQuery = $unexpectedPrimaryQuery
+        MalformedPrimaryQuery = $malformedPrimaryQuery
+        DuplicateColumnsQuery = $duplicateColumnsQuery
         FailureQuery = $failureQuery
         FirstResourceId = $firstResourceId
         SecondResourceId = $secondResourceId
@@ -773,15 +856,20 @@ Assert-True `
 $logAnalyticsQueryProbe = Invoke-ArcIdentityLogAnalyticsQueryProbe
 $logAnalyticsQueryCalls = @($logAnalyticsQueryProbe.Calls)
 Assert-True `
-    -Condition ($logAnalyticsQueryCalls.Count -eq 4) `
+    -Condition ($logAnalyticsQueryCalls.Count -eq 9) `
     -Case 'Log Analytics query row-shape and failure calls'
 Assert-True `
-    -Condition ((@($logAnalyticsQueryCalls.BodyPath | Sort-Object -Unique)).Count -eq 4) `
+    -Condition ((@($logAnalyticsQueryCalls.BodyPath | Sort-Object -Unique)).Count -eq 9) `
     -Case 'Log Analytics calls use unique temporary body files'
 $expectedLogAnalyticsQueries = @(
     $logAnalyticsQueryProbe.SuccessQuery,
     $logAnalyticsQueryProbe.SingleRowQuery,
     $logAnalyticsQueryProbe.EmptyRowsQuery,
+    $logAnalyticsQueryProbe.MissingPrimaryQuery,
+    $logAnalyticsQueryProbe.MultiplePrimaryQuery,
+    $logAnalyticsQueryProbe.UnexpectedPrimaryQuery,
+    $logAnalyticsQueryProbe.MalformedPrimaryQuery,
+    $logAnalyticsQueryProbe.DuplicateColumnsQuery,
     $logAnalyticsQueryProbe.FailureQuery
 )
 for ($callIndex = 0; $callIndex -lt $logAnalyticsQueryCalls.Count; $callIndex++) {
@@ -863,10 +951,18 @@ Assert-True `
         $compatibleLogAnalyticsRows.Count -eq 2 -and
         $compatibleLogAnalyticsRows[0].ResourceId -ceq $logAnalyticsQueryProbe.FirstResourceId -and
         $compatibleLogAnalyticsRows[0].Healthy -eq $true -and
+        $compatibleLogAnalyticsRows[0].HeartbeatFresh -eq $true -and
+        [int] $compatibleLogAnalyticsRows[0].EventCount -eq 8 -and
+        [int] $compatibleLogAnalyticsRows[0].MachineCount -eq 2 -and
+        [int] $compatibleLogAnalyticsRows[0].RecoveryEvents -eq 2 -and
         $compatibleLogAnalyticsRows[1].ResourceId -ceq $logAnalyticsQueryProbe.SecondResourceId -and
-        $compatibleLogAnalyticsRows[1].Healthy -eq $false
+        $compatibleLogAnalyticsRows[1].Healthy -eq $false -and
+        $compatibleLogAnalyticsRows[1].HeartbeatFresh -eq $false -and
+        [int] $compatibleLogAnalyticsRows[1].EventCount -eq 4 -and
+        [int] $compatibleLogAnalyticsRows[1].MachineCount -eq 1 -and
+        [int] $compatibleLogAnalyticsRows[1].RecoveryEvents -eq 1
     ) `
-    -Case 'Log Analytics REST rows remain response-item compatible'
+    -Case 'Log Analytics REST named fields remain response-item compatible'
 $compatibleSingleLogAnalyticsRow = @(
     Get-ArcIdentityResponseItems `
         -Response $logAnalyticsQueryProbe.SingleRowRows `
@@ -876,7 +972,11 @@ Assert-True `
     -Condition (
         $compatibleSingleLogAnalyticsRow.Count -eq 1 -and
         $compatibleSingleLogAnalyticsRow[0].ResourceId -ceq $logAnalyticsQueryProbe.FirstResourceId -and
-        $compatibleSingleLogAnalyticsRow[0].Healthy -eq $true
+        $compatibleSingleLogAnalyticsRow[0].Healthy -eq $true -and
+        $compatibleSingleLogAnalyticsRow[0].HeartbeatFresh -eq $true -and
+        [int] $compatibleSingleLogAnalyticsRow[0].EventCount -eq 8 -and
+        [int] $compatibleSingleLogAnalyticsRow[0].MachineCount -eq 2 -and
+        [int] $compatibleSingleLogAnalyticsRow[0].RecoveryEvents -eq 2
     ) `
     -Case 'Single Log Analytics REST row preserves its columns'
 $compatibleEmptyLogAnalyticsRows = @(
@@ -887,6 +987,20 @@ $compatibleEmptyLogAnalyticsRows = @(
 Assert-True `
     -Condition ($compatibleEmptyLogAnalyticsRows.Count -eq 0) `
     -Case 'Empty Log Analytics REST rows remain empty'
+Assert-True `
+    -Condition (
+        $logAnalyticsQueryProbe.ShapeErrors.MissingPrimary -ceq
+        'Log Analytics query response must contain exactly one PrimaryResult table.' -and
+        $logAnalyticsQueryProbe.ShapeErrors.MultiplePrimary -ceq
+        'Log Analytics query response must contain exactly one PrimaryResult table.' -and
+        $logAnalyticsQueryProbe.ShapeErrors.UnexpectedPrimary -ceq
+        'Log Analytics query response must contain exactly one PrimaryResult table.' -and
+        $logAnalyticsQueryProbe.ShapeErrors.MalformedPrimary -ceq
+        'Log Analytics PrimaryResult table must contain a nonempty columns array and a rows array.' -and
+        $logAnalyticsQueryProbe.ShapeErrors.DuplicateColumns -ceq
+        'Log Analytics query response contained duplicate column ''ResourceId''.'
+    ) `
+    -Case 'Malformed Log Analytics primary result shapes fail explicitly'
 Assert-True `
     -Condition (
         $logAnalyticsQueryProbe.FailureMessage -ceq

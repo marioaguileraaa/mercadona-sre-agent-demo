@@ -771,45 +771,58 @@ function Invoke-ArcIdentityLogAnalyticsQuery {
     }
 
     $tablesProperty = $response.PSObject.Properties['tables']
-    if ($null -eq $tablesProperty -or $null -eq $tablesProperty.Value) {
-        throw 'Log Analytics query response did not expose a tables collection.'
+    if ($null -eq $tablesProperty -or
+        $tablesProperty.Value -isnot [array] -or
+        $tablesProperty.Value.Count -ne 1) {
+        throw 'Log Analytics query response must contain exactly one PrimaryResult table.'
+    }
+    $primaryTable = $tablesProperty.Value[0]
+    $tableNameProperty = $primaryTable.PSObject.Properties['name']
+    if ($null -eq $tableNameProperty -or
+        $tableNameProperty.Value -isnot [string] -or
+        $tableNameProperty.Value -cne 'PrimaryResult') {
+        throw 'Log Analytics query response must contain exactly one PrimaryResult table.'
+    }
+    $columnsProperty = $primaryTable.PSObject.Properties['columns']
+    $rowsProperty = $primaryTable.PSObject.Properties['rows']
+    if ($null -eq $columnsProperty -or
+        $columnsProperty.Value -isnot [array] -or
+        $columnsProperty.Value.Count -eq 0 -or
+        $null -eq $rowsProperty -or
+        $rowsProperty.Value -isnot [array]) {
+        throw 'Log Analytics PrimaryResult table must contain a nonempty columns array and a rows array.'
+    }
+
+    $columnNameSet = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $columnNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($column in $columnsProperty.Value) {
+        $columnName = [string] (
+            Get-ArcIdentityOptionalPropertyValue -InputObject $column -PropertyName 'name'
+        )
+        if ([string]::IsNullOrWhiteSpace($columnName)) {
+            throw 'Log Analytics query response contained an unnamed column.'
+        }
+        if (-not $columnNameSet.Add($columnName)) {
+            throw "Log Analytics query response contained duplicate column '$columnName'."
+        }
+        $columnNames.Add($columnName)
     }
     $queryRows = [System.Collections.Generic.List[object]]::new()
-    foreach ($table in @($tablesProperty.Value)) {
-        $columnsProperty = $table.PSObject.Properties['columns']
-        $rowsProperty = $table.PSObject.Properties['rows']
-        if ($null -eq $columnsProperty -or
-            $null -eq $columnsProperty.Value -or
-            $null -eq $rowsProperty -or
-            $null -eq $rowsProperty.Value) {
-            throw 'Log Analytics query response table did not expose columns and rows.'
+    foreach ($row in $rowsProperty.Value) {
+        if ($row -isnot [array]) {
+            throw 'Log Analytics query response row must be an array.'
         }
-        $columnNames = @(
-            foreach ($column in @($columnsProperty.Value)) {
-                $columnName = [string] (
-                    Get-ArcIdentityOptionalPropertyValue -InputObject $column -PropertyName 'name'
-                )
-                if ([string]::IsNullOrWhiteSpace($columnName)) {
-                    throw 'Log Analytics query response contained an unnamed column.'
-                }
-                $columnName
-            }
-        )
-        foreach ($row in @($rowsProperty.Value)) {
-            $rowValues = @($row)
-            if ($rowValues.Count -ne $columnNames.Count) {
-                throw 'Log Analytics query response row did not match its column count.'
-            }
-            $rowProperties = [ordered]@{}
-            for ($index = 0; $index -lt $columnNames.Count; $index++) {
-                $columnName = $columnNames[$index]
-                if ($rowProperties.Contains($columnName)) {
-                    throw "Log Analytics query response contained duplicate column '$columnName'."
-                }
-                $rowProperties[$columnName] = $rowValues[$index]
-            }
-            $queryRows.Add([pscustomobject] $rowProperties)
+        if ($row.Count -ne $columnNames.Count) {
+            throw 'Log Analytics query response row did not match its column count.'
         }
+        $rowProperties = [ordered]@{}
+        for ($index = 0; $index -lt $columnNames.Count; $index++) {
+            $columnName = $columnNames[$index]
+            $rowProperties[$columnName] = $row[$index]
+        }
+        $queryRows.Add([pscustomobject] $rowProperties)
     }
     return $queryRows.ToArray()
 }
