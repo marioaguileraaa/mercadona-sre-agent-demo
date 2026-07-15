@@ -77,10 +77,10 @@ El script:
 3. crea o reutiliza la fuente `Mercadona.IdentityOps` en Application;
 4. escribe exactamente 12 eventos Warning por host, ID 4101;
 5. incluye JSON con `demoSynthetic=true` y un `correlationId`;
-6. evita duplicados si se repite el mismo correlation ID;
+6. consulta LAW por los dos `_ResourceId` permitidos antes de cada escritura y combina su recuento persistente con el log Application local mediante el máximo, evitando duplicados aunque el log local haya rotado;
 7. limita el parámetro a 8-20 eventos por host;
 8. elimina cada recurso Run Command temporal;
-9. espera el recuento agregado exacto en LAW.
+9. exige finalmente 12 eventos por cada host permitido, 24 eventos y dos máquinas en total.
 
 Guardar el `correlationId` mostrado. No se producen logons, tokens, usuarios ni fallos de credenciales reales.
 
@@ -112,7 +112,7 @@ No proyectar `RenderedDescription`, nombres de usuario ni mensajes de eventos en
   -CorrelationId 'SYNTH-ID-REEMPLAZAR'
 ```
 
-El script comprueba que existen eventos 4101 del correlation ID, emite como máximo un evento 4102 por host, elimina Run Command y espera exactamente dos recuperaciones en LAW. Repetirlo con el mismo ID es seguro: no añade otra recuperación.
+El script exige al menos un 4101 autoritativo en LAW para cada `_ResourceId`, combina los recuentos LAW/local mediante el máximo, emite como máximo un 4102 por host, elimina Run Command y espera exactamente dos recuperaciones en LAW. Si el log Application local rotó pero LAW conserva el incidente, la recuperación sigue siendo válida; repetirla con el mismo ID no añade otra recuperación.
 
 La regla debe auto-resolverse cuando la ventana de cinco minutos deje de contener la ráfaga. Si no se resuelve:
 

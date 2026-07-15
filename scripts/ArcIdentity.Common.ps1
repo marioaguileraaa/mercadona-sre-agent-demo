@@ -827,6 +827,319 @@ function Invoke-ArcIdentityLogAnalyticsQuery {
     return $queryRows.ToArray()
 }
 
+function Get-ArcIdentitySyntheticTargetResources {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $SubscriptionId,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ResourceGroupName,
+        [Parameter(Mandatory)]
+        [ValidateCount(2, 2)]
+        [string[]] $MachineNames
+    )
+
+    $allowedResourceIds = [ordered]@{
+        'ArcBox-Win2K22' = '/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourceGroups/rg-arcbox-itpro-weu-002/providers/Microsoft.HybridCompute/machines/ArcBox-Win2K22'
+        'ArcBox-Win2K25' = '/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourceGroups/rg-arcbox-itpro-weu-002/providers/Microsoft.HybridCompute/machines/ArcBox-Win2K25'
+    }
+    $allowedResourceIdSet = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($allowedResourceId in $allowedResourceIds.Values) {
+        $null = $allowedResourceIdSet.Add([string] $allowedResourceId)
+    }
+
+    $requestedResourceIdSet = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $targets = [System.Collections.Generic.List[object]]::new()
+    foreach ($machineName in $MachineNames) {
+        if ([string]::IsNullOrWhiteSpace($machineName)) {
+            throw 'Synthetic target machine names must be nonblank.'
+        }
+        $requestedResourceId = Get-ArcIdentityMachineResourceId `
+            -SubscriptionId $SubscriptionId `
+            -ResourceGroupName $ResourceGroupName `
+            -MachineName $machineName
+        if (-not $allowedResourceIdSet.Contains($requestedResourceId)) {
+            throw "Synthetic target resource ID '$requestedResourceId' is not allowlisted."
+        }
+        if (-not $requestedResourceIdSet.Add($requestedResourceId)) {
+            throw "Synthetic target resource ID '$requestedResourceId' was requested more than once."
+        }
+        $canonicalMachineName = @(
+            $allowedResourceIds.Keys | Where-Object {
+                [string]::Equals(
+                    [string] $allowedResourceIds[$_],
+                    $requestedResourceId,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+        )[0]
+        $targets.Add([pscustomobject]@{
+                MachineName = [string] $canonicalMachineName
+                ResourceId = [string] $allowedResourceIds[$canonicalMachineName]
+                NormalizedResourceId = ([string] $allowedResourceIds[$canonicalMachineName]).ToLowerInvariant()
+            })
+    }
+    if ($requestedResourceIdSet.Count -ne $allowedResourceIdSet.Count) {
+        throw 'Exactly the two allowlisted synthetic Arc machine resource IDs are required.'
+    }
+    return $targets.ToArray()
+}
+
+function ConvertTo-ArcIdentitySyntheticEventCountRows {
+    param(
+        [AllowNull()]
+        [object[]] $Rows,
+        [Parameter(Mandatory)]
+        [ValidateCount(2, 2)]
+        [string[]] $TargetResourceIds
+    )
+
+    $targetByNormalizedId = [System.Collections.Generic.Dictionary[string, string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($targetResourceId in $TargetResourceIds) {
+        if ([string]::IsNullOrWhiteSpace($targetResourceId)) {
+            throw 'Synthetic target resource IDs must be nonblank.'
+        }
+        if (-not $targetByNormalizedId.TryAdd(
+                $targetResourceId.ToLowerInvariant(),
+                $targetResourceId
+            )) {
+            throw "Synthetic target resource ID '$targetResourceId' was supplied more than once."
+        }
+    }
+
+    $countByNormalizedId = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($row in @($Rows)) {
+        if ($null -eq $row) {
+            throw 'Log Analytics synthetic event count rows must not contain null entries.'
+        }
+        $resourceIdValue = Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $row `
+            -PropertyName 'ResourceId'
+        if ($resourceIdValue -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string] $resourceIdValue)) {
+            throw 'Log Analytics synthetic event count row did not expose a nonblank ResourceId.'
+        }
+        $normalizedResourceId = ([string] $resourceIdValue).ToLowerInvariant()
+        if (-not $targetByNormalizedId.ContainsKey($normalizedResourceId)) {
+            throw "Log Analytics returned non-allowlisted synthetic resource ID '$resourceIdValue'."
+        }
+        if ($countByNormalizedId.ContainsKey($normalizedResourceId)) {
+            throw "Log Analytics returned duplicate synthetic event count rows for '$resourceIdValue'."
+        }
+
+        $counts = [ordered]@{}
+        foreach ($propertyName in @('IncidentCount', 'RecoveryCount')) {
+            $countValue = Get-ArcIdentityOptionalPropertyValue `
+                -InputObject $row `
+                -PropertyName $propertyName
+            $parsedCount = 0L
+            if ($null -eq $countValue -or
+                -not [long]::TryParse(
+                    [string] $countValue,
+                    [Globalization.NumberStyles]::Integer,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [ref] $parsedCount
+                ) -or
+                $parsedCount -lt 0) {
+                throw "Log Analytics synthetic event count row for '$resourceIdValue' has invalid $propertyName."
+            }
+            $counts[$propertyName] = $parsedCount
+        }
+        $countByNormalizedId.Add(
+            $normalizedResourceId,
+            [pscustomobject]@{
+                ResourceId = $targetByNormalizedId[$normalizedResourceId]
+                NormalizedResourceId = $normalizedResourceId
+                IncidentCount = [long] $counts.IncidentCount
+                RecoveryCount = [long] $counts.RecoveryCount
+            }
+        )
+    }
+
+    $mappedRows = [System.Collections.Generic.List[object]]::new()
+    foreach ($targetResourceId in $TargetResourceIds) {
+        $normalizedResourceId = $targetResourceId.ToLowerInvariant()
+        if ($countByNormalizedId.ContainsKey($normalizedResourceId)) {
+            $mappedRows.Add($countByNormalizedId[$normalizedResourceId])
+            continue
+        }
+        $mappedRows.Add([pscustomobject]@{
+                ResourceId = $targetResourceId
+                NormalizedResourceId = $normalizedResourceId
+                IncidentCount = 0L
+                RecoveryCount = 0L
+            })
+    }
+    return $mappedRows.ToArray()
+}
+
+function Get-ArcIdentitySyntheticEventCountRows {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $SubscriptionId,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $WorkspaceCustomerId,
+        [Parameter(Mandatory)]
+        [ValidatePattern('^SYNTH-ID-[0-9]{8}T[0-9]{6}Z-[A-F0-9]{8}$')]
+        [string] $CorrelationId,
+        [Parameter(Mandatory)]
+        [ValidateCount(2, 2)]
+        [object[]] $TargetResources
+    )
+
+    $correlationTimestamp = [DateTimeOffset]::ParseExact(
+        $CorrelationId.Substring(9, 16),
+        "yyyyMMdd'T'HHmmss'Z'",
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal
+    )
+    $correlationHourUtc = [DateTimeOffset]::new(
+        $correlationTimestamp.Year,
+        $correlationTimestamp.Month,
+        $correlationTimestamp.Day,
+        $correlationTimestamp.Hour,
+        0,
+        0,
+        [TimeSpan]::Zero
+    ).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ', [Globalization.CultureInfo]::InvariantCulture)
+    $targetResourceIds = [System.Collections.Generic.List[string]]::new()
+    $normalizedResourceIdLiterals = [System.Collections.Generic.List[string]]::new()
+    foreach ($targetResource in $TargetResources) {
+        $resourceId = Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $targetResource `
+            -PropertyName 'ResourceId'
+        $normalizedResourceId = Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $targetResource `
+            -PropertyName 'NormalizedResourceId'
+        if ($resourceId -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string] $resourceId) -or
+            $normalizedResourceId -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string] $normalizedResourceId) -or
+            -not [string]::Equals(
+                ([string] $resourceId).ToLowerInvariant(),
+                [string] $normalizedResourceId,
+                [StringComparison]::Ordinal
+            )) {
+            throw 'Synthetic target resource mapping is missing an exact normalized resource ID.'
+        }
+        $targetResourceIds.Add([string] $resourceId)
+        $normalizedResourceIdLiterals.Add("""$normalizedResourceId""")
+    }
+    $resourceIdList = $normalizedResourceIdLiterals -join ', '
+    $query = @"
+Event
+| where TimeGenerated >= datetime($correlationHourUtc)
+| where EventLog == "Application" and Source == "Mercadona.IdentityOps"
+| where EventID in (4101, 4102)
+| where tolower(_ResourceId) in ($resourceIdList)
+| extend SyntheticPayload = parse_json(RenderedDescription)
+| where tobool(SyntheticPayload.demoSynthetic) == true
+| where tostring(SyntheticPayload.correlationId) == "$CorrelationId"
+| where tostring(SyntheticPayload.scenario) == "adfs-token-failure-burst"
+| where (EventID == 4101 and tostring(SyntheticPayload.eventType) == "SyntheticAdfsTokenFailure")
+    or (EventID == 4102 and tostring(SyntheticPayload.eventType) == "SyntheticAdfsRecovery")
+| summarize IncidentCount=countif(EventID == 4101), RecoveryCount=countif(EventID == 4102)
+    by ResourceId=tolower(_ResourceId)
+"@
+    $rows = @(
+        Invoke-ArcIdentityLogAnalyticsQuery `
+            -SubscriptionId $SubscriptionId `
+            -WorkspaceCustomerId $WorkspaceCustomerId `
+            -Query $query
+    )
+    return @(
+        ConvertTo-ArcIdentitySyntheticEventCountRows `
+            -Rows $rows `
+            -TargetResourceIds $targetResourceIds.ToArray()
+    )
+}
+
+function Resolve-ArcIdentitySyntheticEventState {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Start', 'Recover')]
+        [string] $Operation,
+        [Parameter(Mandatory)]
+        [int] $LocalIncidentCount,
+        [Parameter(Mandatory)]
+        [int] $LocalRecoveryCount,
+        [Parameter(Mandatory)]
+        [int] $AuthoritativeIncidentCount,
+        [Parameter(Mandatory)]
+        [int] $AuthoritativeRecoveryCount,
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 100)]
+        [int] $IncidentBound,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $CorrelationId
+    )
+
+    foreach ($count in @(
+            $LocalIncidentCount,
+            $LocalRecoveryCount,
+            $AuthoritativeIncidentCount,
+            $AuthoritativeRecoveryCount
+        )) {
+        if ($count -lt 0) {
+            throw "Synthetic event counts for correlation '$CorrelationId' must not be negative."
+        }
+    }
+    if ($Operation -eq 'Start') {
+        if ($LocalIncidentCount -gt $IncidentBound) {
+            throw "Local Application log has $LocalIncidentCount incident events for correlation '$CorrelationId', above the bounded count $IncidentBound."
+        }
+        if ($AuthoritativeIncidentCount -gt $IncidentBound) {
+            throw "Log Analytics has $AuthoritativeIncidentCount incident events for correlation '$CorrelationId', above the bounded count $IncidentBound."
+        }
+        if ($LocalRecoveryCount -gt 0 -or $AuthoritativeRecoveryCount -gt 0) {
+            throw "Correlation '$CorrelationId' already has a synthetic recovery event; refusing to reopen it."
+        }
+    } else {
+        if ($AuthoritativeIncidentCount -eq 0) {
+            throw "Log Analytics has no authoritative synthetic incident event for correlation '$CorrelationId'."
+        }
+        if ($LocalRecoveryCount -gt 1) {
+            throw "Local Application log has more than one synthetic recovery event for correlation '$CorrelationId'."
+        }
+        if ($AuthoritativeRecoveryCount -gt 1) {
+            throw "Log Analytics has more than one synthetic recovery event for correlation '$CorrelationId'."
+        }
+    }
+
+    $existingIncidentCount = [Math]::Max(
+        $LocalIncidentCount,
+        $AuthoritativeIncidentCount
+    )
+    $existingRecoveryCount = [Math]::Max(
+        $LocalRecoveryCount,
+        $AuthoritativeRecoveryCount
+    )
+    $emitCount = if ($Operation -eq 'Start') {
+        $IncidentBound - $existingIncidentCount
+    } elseif ($existingRecoveryCount -eq 0) {
+        1
+    } else {
+        0
+    }
+    return [pscustomobject]@{
+        ExistingIncidentCount = $existingIncidentCount
+        ExistingRecoveryCount = $existingRecoveryCount
+        EmitCount = $emitCount
+    }
+}
+
 function Test-ArcIdentityRoleAssignment {
     param(
         [Parameter(Mandatory)]

@@ -1232,6 +1232,344 @@ Assert-True `
     ) `
     -Case 'Log Analytics query failure remains explicit'
 
+$syntheticSubscriptionId = '5305e853-a63b-4b82-9a3f-6fde18c1a798'
+$syntheticResourceGroupName = 'rg-arcbox-itpro-weu-002'
+$syntheticCorrelationId = 'SYNTH-ID-20260715T105033Z-B3E71B81'
+$syntheticTargets = @(
+    Get-ArcIdentitySyntheticTargetResources `
+        -SubscriptionId $syntheticSubscriptionId `
+        -ResourceGroupName $syntheticResourceGroupName `
+        -MachineNames @('ArcBox-Win2K22', 'ArcBox-Win2K25')
+)
+$expectedSyntheticResourceIds = @(
+    "/subscriptions/$syntheticSubscriptionId/resourceGroups/$syntheticResourceGroupName/providers/Microsoft.HybridCompute/machines/ArcBox-Win2K22",
+    "/subscriptions/$syntheticSubscriptionId/resourceGroups/$syntheticResourceGroupName/providers/Microsoft.HybridCompute/machines/ArcBox-Win2K25"
+)
+Assert-True `
+    -Condition (
+        $syntheticTargets.Count -eq 2 -and
+        ($syntheticTargets.ResourceId -join "`0") -ceq
+        ($expectedSyntheticResourceIds -join "`0") -and
+        $syntheticTargets[0].NormalizedResourceId -ceq
+        $expectedSyntheticResourceIds[0].ToLowerInvariant() -and
+        $syntheticTargets[1].NormalizedResourceId -ceq
+        $expectedSyntheticResourceIds[1].ToLowerInvariant()
+    ) `
+    -Case 'Exact case-insensitive synthetic target resource ID mapping'
+$nonAllowlistedTargetError = $null
+try {
+    $null = Get-ArcIdentitySyntheticTargetResources `
+        -SubscriptionId $syntheticSubscriptionId `
+        -ResourceGroupName $syntheticResourceGroupName `
+        -MachineNames @('ArcBox-Win2K22', 'ArcBox-Unapproved')
+} catch {
+    $nonAllowlistedTargetError = $_.Exception.Message
+}
+Assert-True `
+    -Condition (
+        $nonAllowlistedTargetError -ceq
+        "Synthetic target resource ID '/subscriptions/$syntheticSubscriptionId/resourceGroups/$syntheticResourceGroupName/providers/Microsoft.HybridCompute/machines/ArcBox-Unapproved' is not allowlisted."
+    ) `
+    -Case 'Non-allowlisted synthetic target resource ID rejection'
+
+$zeroSyntheticRows = @(
+    ConvertTo-ArcIdentitySyntheticEventCountRows `
+        -Rows @() `
+        -TargetResourceIds $expectedSyntheticResourceIds
+)
+Assert-True `
+    -Condition (
+        $zeroSyntheticRows.Count -eq 2 -and
+        [int] $zeroSyntheticRows[0].IncidentCount -eq 0 -and
+        [int] $zeroSyntheticRows[0].RecoveryCount -eq 0 -and
+        [int] $zeroSyntheticRows[1].IncidentCount -eq 0 -and
+        [int] $zeroSyntheticRows[1].RecoveryCount -eq 0
+    ) `
+    -Case 'Zero-row LAW mapping produces two exact zero-count targets'
+$singleSyntheticRows = @(
+    ConvertTo-ArcIdentitySyntheticEventCountRows `
+        -Rows @(
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[0].ToUpperInvariant()
+                IncidentCount = 12
+                RecoveryCount = 0
+            }
+        ) `
+        -TargetResourceIds $expectedSyntheticResourceIds
+)
+Assert-True `
+    -Condition (
+        $singleSyntheticRows.Count -eq 2 -and
+        $singleSyntheticRows[0].ResourceId -ceq $expectedSyntheticResourceIds[0] -and
+        [int] $singleSyntheticRows[0].IncidentCount -eq 12 -and
+        [int] $singleSyntheticRows[1].IncidentCount -eq 0
+    ) `
+    -Case 'Singleton LAW mapping is case-insensitive and fills the missing target'
+$multiSyntheticRows = @(
+    ConvertTo-ArcIdentitySyntheticEventCountRows `
+        -Rows @(
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[1]
+                IncidentCount = '9'
+                RecoveryCount = '1'
+            },
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[0].ToUpperInvariant()
+                IncidentCount = 12L
+                RecoveryCount = 0L
+            }
+        ) `
+        -TargetResourceIds $expectedSyntheticResourceIds
+)
+Assert-True `
+    -Condition (
+        $multiSyntheticRows.Count -eq 2 -and
+        $multiSyntheticRows[0].ResourceId -ceq $expectedSyntheticResourceIds[0] -and
+        [int] $multiSyntheticRows[0].IncidentCount -eq 12 -and
+        $multiSyntheticRows[1].ResourceId -ceq $expectedSyntheticResourceIds[1] -and
+        [int] $multiSyntheticRows[1].IncidentCount -eq 9 -and
+        [int] $multiSyntheticRows[1].RecoveryCount -eq 1
+    ) `
+    -Case 'Multi-row LAW mapping preserves exact target order and typed counts'
+$invalidSyntheticRowError = $null
+try {
+    $null = ConvertTo-ArcIdentitySyntheticEventCountRows `
+        -Rows @([pscustomobject]@{ ResourceId = $expectedSyntheticResourceIds[0]; IncidentCount = 1 }) `
+        -TargetResourceIds $expectedSyntheticResourceIds
+} catch {
+    $invalidSyntheticRowError = $_.Exception.Message
+}
+Assert-True `
+    -Condition (
+        $invalidSyntheticRowError -ceq
+        "Log Analytics synthetic event count row for '$($expectedSyntheticResourceIds[0])' has invalid RecoveryCount."
+    ) `
+    -Case 'Optional LAW count property fails explicitly under StrictMode'
+
+$startLawOnlyState = Resolve-ArcIdentitySyntheticEventState `
+    -Operation Start `
+    -LocalIncidentCount 0 `
+    -LocalRecoveryCount 0 `
+    -AuthoritativeIncidentCount 12 `
+    -AuthoritativeRecoveryCount 0 `
+    -IncidentBound 12 `
+    -CorrelationId $syntheticCorrelationId
+Assert-True `
+    -Condition (
+        $startLawOnlyState.ExistingIncidentCount -eq 12 -and
+        $startLawOnlyState.EmitCount -eq 0
+    ) `
+    -Case 'Start LAW 12 local 0 does not duplicate'
+$startLocalOnlyState = Resolve-ArcIdentitySyntheticEventState `
+    -Operation Start `
+    -LocalIncidentCount 12 `
+    -LocalRecoveryCount 0 `
+    -AuthoritativeIncidentCount 0 `
+    -AuthoritativeRecoveryCount 0 `
+    -IncidentBound 12 `
+    -CorrelationId $syntheticCorrelationId
+Assert-True `
+    -Condition (
+        $startLocalOnlyState.ExistingIncidentCount -eq 12 -and
+        $startLocalOnlyState.EmitCount -eq 0
+    ) `
+    -Case 'Start LAW 0 local 12 does not duplicate'
+$startPartialLawState = Resolve-ArcIdentitySyntheticEventState `
+    -Operation Start `
+    -LocalIncidentCount 12 `
+    -LocalRecoveryCount 0 `
+    -AuthoritativeIncidentCount 5 `
+    -AuthoritativeRecoveryCount 0 `
+    -IncidentBound 12 `
+    -CorrelationId $syntheticCorrelationId
+Assert-True `
+    -Condition (
+        $startPartialLawState.ExistingIncidentCount -eq 12 -and
+        $startPartialLawState.EmitCount -eq 0
+    ) `
+    -Case 'Start partial LAW and complete local state does not duplicate'
+$startEmptyState = Resolve-ArcIdentitySyntheticEventState `
+    -Operation Start `
+    -LocalIncidentCount 0 `
+    -LocalRecoveryCount 0 `
+    -AuthoritativeIncidentCount 0 `
+    -AuthoritativeRecoveryCount 0 `
+    -IncidentBound 12 `
+    -CorrelationId $syntheticCorrelationId
+Assert-True `
+    -Condition (
+        $startEmptyState.ExistingIncidentCount -eq 0 -and
+        $startEmptyState.EmitCount -eq 12
+    ) `
+    -Case 'Start empty LAW and local state emits only to the bound'
+$startOverBoundError = $null
+try {
+    $null = Resolve-ArcIdentitySyntheticEventState `
+        -Operation Start `
+        -LocalIncidentCount 0 `
+        -LocalRecoveryCount 0 `
+        -AuthoritativeIncidentCount 13 `
+        -AuthoritativeRecoveryCount 0 `
+        -IncidentBound 12 `
+        -CorrelationId $syntheticCorrelationId
+} catch {
+    $startOverBoundError = $_.Exception.Message
+}
+Assert-True `
+    -Condition (
+        $startOverBoundError -ceq
+        "Log Analytics has 13 incident events for correlation '$syntheticCorrelationId', above the bounded count 12."
+    ) `
+    -Case 'Start LAW above bound rejects'
+$startRecoveredError = $null
+try {
+    $null = Resolve-ArcIdentitySyntheticEventState `
+        -Operation Start `
+        -LocalIncidentCount 12 `
+        -LocalRecoveryCount 0 `
+        -AuthoritativeIncidentCount 12 `
+        -AuthoritativeRecoveryCount 1 `
+        -IncidentBound 12 `
+        -CorrelationId $syntheticCorrelationId
+} catch {
+    $startRecoveredError = $_.Exception.Message
+}
+Assert-True `
+    -Condition (
+        $startRecoveredError -ceq
+        "Correlation '$syntheticCorrelationId' already has a synthetic recovery event; refusing to reopen it."
+    ) `
+    -Case 'Start existing LAW recovery rejects reopening'
+$recoverLawIncidentState = Resolve-ArcIdentitySyntheticEventState `
+    -Operation Recover `
+    -LocalIncidentCount 0 `
+    -LocalRecoveryCount 0 `
+    -AuthoritativeIncidentCount 12 `
+    -AuthoritativeRecoveryCount 0 `
+    -IncidentBound 20 `
+    -CorrelationId $syntheticCorrelationId
+Assert-True `
+    -Condition (
+        $recoverLawIncidentState.ExistingIncidentCount -eq 12 -and
+        $recoverLawIncidentState.EmitCount -eq 1
+    ) `
+    -Case 'Recovery LAW incident present local zero writes one'
+$recoverLawRecoveryState = Resolve-ArcIdentitySyntheticEventState `
+    -Operation Recover `
+    -LocalIncidentCount 0 `
+    -LocalRecoveryCount 0 `
+    -AuthoritativeIncidentCount 12 `
+    -AuthoritativeRecoveryCount 1 `
+    -IncidentBound 20 `
+    -CorrelationId $syntheticCorrelationId
+Assert-True `
+    -Condition (
+        $recoverLawRecoveryState.ExistingRecoveryCount -eq 1 -and
+        $recoverLawRecoveryState.EmitCount -eq 0
+    ) `
+    -Case 'Recovery LAW recovery one local zero does not duplicate'
+$recoverLocalRecoveryState = Resolve-ArcIdentitySyntheticEventState `
+    -Operation Recover `
+    -LocalIncidentCount 0 `
+    -LocalRecoveryCount 1 `
+    -AuthoritativeIncidentCount 12 `
+    -AuthoritativeRecoveryCount 0 `
+    -IncidentBound 20 `
+    -CorrelationId $syntheticCorrelationId
+Assert-True `
+    -Condition (
+        $recoverLocalRecoveryState.ExistingIncidentCount -eq 12 -and
+        $recoverLocalRecoveryState.ExistingRecoveryCount -eq 1 -and
+        $recoverLocalRecoveryState.EmitCount -eq 0
+    ) `
+    -Case 'Recovery local recovery one LAW recovery zero does not duplicate'
+$recoverExcessLawError = $null
+try {
+    $null = Resolve-ArcIdentitySyntheticEventState `
+        -Operation Recover `
+        -LocalIncidentCount 12 `
+        -LocalRecoveryCount 0 `
+        -AuthoritativeIncidentCount 12 `
+        -AuthoritativeRecoveryCount 2 `
+        -IncidentBound 20 `
+        -CorrelationId $syntheticCorrelationId
+} catch {
+    $recoverExcessLawError = $_.Exception.Message
+}
+Assert-True `
+    -Condition (
+        $recoverExcessLawError -ceq
+        "Log Analytics has more than one synthetic recovery event for correlation '$syntheticCorrelationId'."
+    ) `
+    -Case 'Recovery rejects more than one authoritative LAW recovery'
+
+$originalLogAnalyticsQueryFunction = (Get-Item Function:\Invoke-ArcIdentityLogAnalyticsQuery).ScriptBlock
+$script:capturedSyntheticCountQuery = $null
+try {
+    function Invoke-ArcIdentityLogAnalyticsQuery {
+        param(
+            [Parameter(Mandatory)]
+            [string] $SubscriptionId,
+            [Parameter(Mandatory)]
+            [string] $WorkspaceCustomerId,
+            [Parameter(Mandatory)]
+            [string] $Query
+        )
+
+        $script:capturedSyntheticCountQuery = [pscustomobject]@{
+            SubscriptionId = $SubscriptionId
+            WorkspaceCustomerId = $WorkspaceCustomerId
+            Query = $Query
+        }
+        return [pscustomobject]@{
+            ResourceId = $expectedSyntheticResourceIds[0].ToUpperInvariant()
+            IncidentCount = 12
+            RecoveryCount = 0
+        }
+    }
+
+    $syntheticCountQueryRows = @(
+        Get-ArcIdentitySyntheticEventCountRows `
+            -SubscriptionId $syntheticSubscriptionId `
+            -WorkspaceCustomerId 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' `
+            -CorrelationId $syntheticCorrelationId `
+            -TargetResources $syntheticTargets
+    )
+} finally {
+    Set-Item `
+        -Path Function:\Invoke-ArcIdentityLogAnalyticsQuery `
+        -Value $originalLogAnalyticsQueryFunction
+}
+Assert-True `
+    -Condition (
+        $syntheticCountQueryRows.Count -eq 2 -and
+        [int] $syntheticCountQueryRows[0].IncidentCount -eq 12 -and
+        [int] $syntheticCountQueryRows[1].IncidentCount -eq 0
+    ) `
+    -Case 'Production synthetic LAW query maps singleton response'
+foreach ($requiredSyntheticQueryFragment in @(
+        'TimeGenerated >= datetime(2026-07-15T10:00:00.0000000Z)',
+        'EventLog == "Application" and Source == "Mercadona.IdentityOps"',
+        'EventID in (4101, 4102)',
+        'tobool(SyntheticPayload.demoSynthetic) == true',
+        "tostring(SyntheticPayload.correlationId) == `"$syntheticCorrelationId`"",
+        'tostring(SyntheticPayload.scenario) == "adfs-token-failure-burst"',
+        'SyntheticAdfsTokenFailure',
+        'SyntheticAdfsRecovery',
+        'by ResourceId=tolower(_ResourceId)'
+    )) {
+    Assert-Contains `
+        -Source $script:capturedSyntheticCountQuery.Query `
+        -Expected $requiredSyntheticQueryFragment `
+        -Case 'Production synthetic LAW query contract'
+}
+foreach ($expectedSyntheticResourceId in $expectedSyntheticResourceIds) {
+    Assert-Contains `
+        -Source $script:capturedSyntheticCountQuery.Query `
+        -Expected $expectedSyntheticResourceId.ToLowerInvariant() `
+        -Case 'Production synthetic LAW exact resource ID filter'
+}
+
 $expectedSkillFilePaths = @(
     'kql/arc-identity/fleet-heartbeat.kql',
     'kql/arc-identity/data-freshness.kql',
@@ -2300,6 +2638,7 @@ foreach ($source in @($incidentSource, $recoverySource)) {
     Assert-Contains -Source $source -Expected "Mercadona.IdentityOps" -Case 'Dedicated synthetic event source'
     Assert-Contains -Source $source -Expected 'demoSynthetic = $true' -Case 'Synthetic JSON marker'
     Assert-Contains -Source $source -Expected 'correlationId = $correlationId' -Case 'Synthetic correlation ID'
+    Assert-Contains -Source $source -Expected "scenario = 'adfs-token-failure-burst'" -Case 'Synthetic scenario tag'
     Assert-Contains -Source $source -Expected "'S-1-5-18'" -Case 'LocalSystem execution guard'
     Assert-Contains -Source $source -Expected 'Write-EventLog' -Case 'Application event write'
     Assert-NotMatches -Source $source -Pattern '(?i)Install-WindowsFeature|Set-AdfsProperties|New-ADUser|logon|auditpol|Clear-EventLog|wevtutil\s+cl|New-ScheduledTask|Register-ScheduledTask' -Case 'No identity attack, role install, log tampering, or persistent task'
@@ -2307,12 +2646,61 @@ foreach ($source in @($incidentSource, $recoverySource)) {
 }
 Assert-Contains -Source $incidentSource -Expected '[ValidateRange(8, 20)]' -Case 'Bounded event count parameter'
 Assert-Contains -Source $incidentSource -Expected '$sequence -le $burstCount' -Case 'Bounded event write loop'
-Assert-Contains -Source $incidentSource -Expected '$expectedEvents = $MachineNames.Count * $EventsPerMachine' -Case 'Exact ingestion count'
-Assert-Contains -Source $recoverySource -Expected '$recoveryCount -gt 1' -Case 'Single recovery invariant'
+Assert-Contains -Source $incidentSource -Expected '$expectedEvents = $targetResources.Count * $EventsPerMachine' -Case 'Exact ingestion count'
+Assert-Contains -Source $commonSource -Expected '$AuthoritativeRecoveryCount -gt 1' -Case 'Single authoritative recovery invariant'
 Assert-Contains -Source $incidentSource -Expected '[DateTimeOffset]::ParseExact' -Case 'Correlation-scoped retry window'
 Assert-Contains -Source $recoverySource -Expected '[DateTimeOffset]::ParseExact' -Case 'Recovery correlation retry window'
 Assert-Contains -Source $incidentSource -Expected 'ForEach-Object {' -Case 'Streaming incident retry inspection'
 Assert-Contains -Source $recoverySource -Expected 'ForEach-Object {' -Case 'Streaming recovery retry inspection'
+foreach ($source in @($incidentSource, $recoverySource)) {
+    Assert-Contains `
+        -Source $source `
+        -Expected 'Get-ArcIdentitySyntheticTargetResources' `
+        -Case 'Exact synthetic target allowlist mapping'
+    Assert-Contains `
+        -Source $source `
+        -Expected 'Get-ArcIdentitySyntheticEventCountRows' `
+        -Case 'LAW authority before mutation and final verification'
+    Assert-Contains `
+        -Source $source `
+        -Expected "Replace('__STATE_RESOLVER__', `$stateResolverDefinition)" `
+        -Case 'Shared production state resolver injected into guest script'
+    Assert-Contains `
+        -Source $source `
+        -Expected "Replace('__AUTHORITATIVE_INCIDENT_COUNT__'" `
+        -Case 'Authoritative LAW incident count injected into guest script'
+    Assert-Contains `
+        -Source $source `
+        -Expected "Replace('__AUTHORITATIVE_RECOVERY_COUNT__'" `
+        -Case 'Authoritative LAW recovery count injected into guest script'
+    Assert-True `
+        -Condition (
+            [regex]::Matches(
+                $source,
+                "'monitor', 'log-analytics', 'workspace', 'show'"
+            ).Count -eq 1
+        ) `
+        -Case 'Workspace is read exactly once'
+    $preMutationQueryIndex = $source.IndexOf(
+        '$authoritativeRows = @(',
+        [StringComparison]::Ordinal
+    )
+    $runCommandMutationIndex = $source.IndexOf(
+        '$null = Invoke-ArcIdentityRunCommand',
+        [StringComparison]::Ordinal
+    )
+    Assert-True `
+        -Condition (
+            $preMutationQueryIndex -ge 0 -and
+            $preMutationQueryIndex -lt $runCommandMutationIndex
+        ) `
+        -Case 'LAW authority query precedes each possible Run Command mutation'
+}
+Assert-Contains -Source $commonSource -Expected 'TimeGenerated >= datetime($correlationHourUtc)' -Case 'LAW query starts at correlation-derived UTC hour'
+Assert-Contains -Source $commonSource -Expected 'where tolower(_ResourceId) in ($resourceIdList)' -Case 'LAW query exact normalized resource filter'
+Assert-Contains -Source $commonSource -Expected 'ConvertTo-ArcIdentitySyntheticEventCountRows' -Case 'Shared LAW zero-single-multi row mapping'
+Assert-Contains -Source $commonSource -Expected '[Math]::Max(' -Case 'Authoritative LAW and local maximum'
+Assert-NotMatches -Source ($incidentSource + $recoverySource) -Pattern 'ago\(30m\)' -Case 'No wall-clock-only synthetic verification window'
 Assert-NotMatches -Source ($incidentSource + $recoverySource) -Pattern '\$candidateEvents\s*=\s*@\(' -Case 'No materialized event-history collection'
 Assert-NotMatches -Source ($incidentSource + $recoverySource) -Pattern 'ConvertFrom-Json\s+-AsHashtable|\?\?|\?\s*[^:\r\n]+\s*:|&&|\|\|' -Case 'Embedded Run Command remains Windows PowerShell 5.1 compatible'
 Assert-Contains -Source $commonSource -Expected "'connectedmachine', 'run-command', 'delete'" -Case 'Run Command cleanup'
@@ -2354,6 +2742,34 @@ Assert-True `
     ) `
     -Case 'Run Command deadline starts before ARM PUT'
 if ($IsWindows) {
+    $resolverDefinition = "function Resolve-ArcIdentitySyntheticEventState {`n$((Get-Command Resolve-ArcIdentitySyntheticEventState).Definition)`n}"
+    $resolverDefinitionBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($resolverDefinition)
+    )
+    $resolverParserProbe = @"
+`$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$resolverDefinitionBase64'))
+`$tokens = `$null
+`$errors = `$null
+[System.Management.Automation.Language.Parser]::ParseInput(
+    `$source,
+    [ref] `$tokens,
+    [ref] `$errors
+) | Out-Null
+if (`$errors.Count -gt 0) {
+    [Console]::Error.WriteLine((`$errors.Message -join '; '))
+    exit 1
+}
+"@
+    $encodedResolverParserProbe = [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($resolverParserProbe)
+    )
+    & powershell.exe `
+        -NoLogo `
+        -NoProfile `
+        -NonInteractive `
+        -EncodedCommand $encodedResolverParserProbe
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Case 'Shared state resolver parses in Windows PowerShell 5.1'
+
     $windowsPowerShellProbe = @'
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
