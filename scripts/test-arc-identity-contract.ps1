@@ -453,6 +453,196 @@ function Invoke-ArcIdentityArmRestBodyProbe {
     }
 }
 
+function Invoke-ArcIdentityRunCommandProbe {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Success', 'TruncatedScript', 'CreateFailure')]
+        [string] $Mode
+    )
+
+    $subscriptionId = '11111111-2222-3333-4444-555555555555'
+    $resourceGroupName = 'rg-arcbox-itpro-weu-002'
+    $machineName = 'ArcBox-Win2K22'
+    $machineLocation = 'westeurope'
+    $machineResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.HybridCompute/machines/$machineName"
+    $runCommandName = 'identityops-probe-12345678'
+    $timeoutSeconds = 60
+    $expectedUrl = "https://management.azure.com${machineResourceId}/runCommands/${runCommandName}?api-version=2025-01-13"
+    $scriptText = @'
+$ErrorActionPreference = 'Stop'
+$message = "Synthetic `"quoted`" multiline payload"
+Write-Output $message
+'@
+    $state = @{
+        ResourceExists = $false
+        RestCall = $null
+    }
+    $calls = [System.Collections.Generic.List[object]]::new()
+
+    function Get-FakeAzArgumentValue {
+        param(
+            [Parameter(Mandatory)]
+            [string[]] $Arguments,
+            [Parameter(Mandatory)]
+            [string] $Name
+        )
+
+        $index = [Array]::IndexOf($Arguments, $Name)
+        if ($index -lt 0 -or $index -ge ($Arguments.Count - 1)) {
+            throw "Fake Azure CLI call did not include '$Name'."
+        }
+        return $Arguments[$index + 1]
+    }
+
+    function ConvertTo-FakeAzJson {
+        param(
+            [Parameter(Mandatory)]
+            [object] $InputObject
+        )
+
+        return ConvertTo-Json -InputObject $InputObject -Depth 20 -Compress
+    }
+
+    function az {
+        [string[]] $azArguments = @($args | ForEach-Object { [string] $_ })
+        $global:LASTEXITCODE = 0
+
+        if ($azArguments[0] -ceq 'connectedmachine' -and
+            $azArguments[1] -ceq 'run-command' -and
+            $azArguments[2] -ceq 'list') {
+            $calls.Add([pscustomobject]@{
+                    Kind = 'List'
+                    Arguments = [string[]] $azArguments.Clone()
+                })
+            if ($state.ResourceExists) {
+                return ConvertTo-FakeAzJson -InputObject @(
+                    [ordered]@{ name = $runCommandName }
+                )
+            }
+            return ConvertTo-FakeAzJson -InputObject @()
+        }
+        if ($azArguments[0] -ceq 'connectedmachine' -and
+            $azArguments[1] -ceq 'show') {
+            $calls.Add([pscustomobject]@{
+                    Kind = 'MachineShow'
+                    Arguments = [string[]] $azArguments.Clone()
+                })
+            return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                    id = $machineResourceId
+                    location = $machineLocation
+                })
+        }
+        if ($azArguments[0] -ceq 'rest') {
+            $bodyArgument = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--body'
+            if (-not $bodyArgument.StartsWith('@', [StringComparison]::Ordinal)) {
+                throw "Run Command ARM body was not passed as an @file argument: '$bodyArgument'."
+            }
+            $bodyPath = $bodyArgument.Substring(1)
+            if (-not [System.IO.Path]::IsPathFullyQualified($bodyPath) -or
+                -not (Test-Path -LiteralPath $bodyPath -PathType Leaf)) {
+                throw "Run Command ARM body path was not an existing absolute file: '$bodyPath'."
+            }
+            $bodyBytes = [System.IO.File]::ReadAllBytes($bodyPath)
+            $bodyText = [System.Text.UTF8Encoding]::new($false, $true).GetString($bodyBytes)
+            $restCall = [pscustomobject]@{
+                Kind = 'Rest'
+                Arguments = [string[]] $azArguments.Clone()
+                Method = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--method'
+                Url = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--url'
+                Header = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--headers'
+                Output = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--output'
+                BodyArgument = $bodyArgument
+                BodyPath = $bodyPath
+                BodyDocument = $bodyText | ConvertFrom-Json -AsHashtable -Depth 100
+                HasUtf8Bom = (
+                    $bodyBytes.Count -ge 3 -and
+                    $bodyBytes[0] -eq 0xEF -and
+                    $bodyBytes[1] -eq 0xBB -and
+                    $bodyBytes[2] -eq 0xBF
+                )
+            }
+            $state.RestCall = $restCall
+            $calls.Add($restCall)
+            if ($Mode -ceq 'CreateFailure') {
+                $global:LASTEXITCODE = 1
+                return
+            }
+            $state.ResourceExists = $true
+            return
+        }
+        if ($azArguments[0] -ceq 'connectedmachine' -and
+            $azArguments[1] -ceq 'run-command' -and
+            $azArguments[2] -ceq 'show') {
+            $calls.Add([pscustomobject]@{
+                    Kind = 'RunCommandShow'
+                    Arguments = [string[]] $azArguments.Clone()
+                })
+            $persistedScript = if ($Mode -ceq 'TruncatedScript') {
+                $scriptText.Split("`n")[0].TrimEnd("`r")
+            } else {
+                $scriptText
+            }
+            return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+                    name = $runCommandName
+                    properties = [ordered]@{
+                        source = [ordered]@{
+                            script = $persistedScript
+                        }
+                        provisioningState = 'Succeeded'
+                        instanceView = [ordered]@{
+                            executionState = 'Succeeded'
+                            exitCode = 0
+                            output = 'Synthetic output'
+                            error = ''
+                        }
+                    }
+                })
+        }
+        if ($azArguments[0] -ceq 'connectedmachine' -and
+            $azArguments[1] -ceq 'run-command' -and
+            $azArguments[2] -ceq 'delete') {
+            $calls.Add([pscustomobject]@{
+                    Kind = 'Delete'
+                    Arguments = [string[]] $azArguments.Clone()
+                })
+            $state.ResourceExists = $false
+            return
+        }
+
+        throw "Unexpected fake Azure CLI call: $($azArguments -join ' ')"
+    }
+
+    $result = $null
+    $errorMessage = $null
+    try {
+        $result = Invoke-ArcIdentityRunCommand `
+            -SubscriptionId $subscriptionId `
+            -ResourceGroupName $resourceGroupName `
+            -MachineName $machineName `
+            -RunCommandName $runCommandName `
+            -ScriptText $scriptText `
+            -TimeoutSeconds $timeoutSeconds
+    } catch {
+        $errorMessage = $_.Exception.Message
+    } finally {
+        $global:LASTEXITCODE = 0
+    }
+
+    return [pscustomobject]@{
+        Result = $result
+        ErrorMessage = $errorMessage
+        Calls = @($calls)
+        RestCall = $state.RestCall
+        ResourceExists = $state.ResourceExists
+        ScriptText = $scriptText
+        MachineLocation = $machineLocation
+        MachineResourceId = $machineResourceId
+        RunCommandName = $runCommandName
+        TimeoutSeconds = $timeoutSeconds
+        ExpectedUrl = $expectedUrl
+    }
+}
+
 function Invoke-ArcIdentityLogAnalyticsQueryProbe {
     $subscriptionId = '11111111-2222-3333-4444-555555555555'
     $workspaceCustomerId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
@@ -1714,6 +1904,107 @@ Assert-True `
     ) `
     -Case 'Failed ARM call receives the expected body file'
 
+$runCommandSuccessProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'Success'
+$runCommandSuccessRestCall = $runCommandSuccessProbe.RestCall
+Assert-True -Condition ($null -eq $runCommandSuccessProbe.ErrorMessage) -Case 'Run Command ARM success'
+Assert-True -Condition ($null -ne $runCommandSuccessProbe.Result) -Case 'Run Command result is preserved'
+Assert-True -Condition ($null -ne $runCommandSuccessRestCall) -Case 'Run Command uses ARM REST creation'
+Assert-True -Condition ($runCommandSuccessRestCall.Method -ceq 'put') -Case 'Run Command ARM PUT method'
+Assert-True `
+    -Condition ($runCommandSuccessRestCall.Url -ceq $runCommandSuccessProbe.ExpectedUrl) `
+    -Case 'Run Command exact ARM URL and API version'
+Assert-True `
+    -Condition ($runCommandSuccessRestCall.Header -ceq 'Content-Type=application/json') `
+    -Case 'Run Command exact content-type header'
+Assert-True -Condition ($runCommandSuccessRestCall.Output -ceq 'none') -Case 'Run Command ARM output mode'
+Assert-True `
+    -Condition (
+        @($runCommandSuccessRestCall.Arguments | Where-Object { $_ -ceq '--headers' }).Count -eq 1
+    ) `
+    -Case 'Run Command has one headers option'
+Assert-True `
+    -Condition (
+        @($runCommandSuccessRestCall.Arguments | Where-Object { $_ -ceq '--body' }).Count -eq 1
+    ) `
+    -Case 'Run Command has one body option'
+Assert-True `
+    -Condition (
+        $runCommandSuccessRestCall.BodyArgument -ceq "@$($runCommandSuccessRestCall.BodyPath)"
+    ) `
+    -Case 'Run Command body uses exact @file argument'
+Assert-True `
+    -Condition ([System.IO.Path]::IsPathFullyQualified($runCommandSuccessRestCall.BodyPath)) `
+    -Case 'Run Command body path is absolute'
+Assert-True -Condition (-not $runCommandSuccessRestCall.HasUtf8Bom) -Case 'Run Command body has no UTF-8 BOM'
+Assert-True `
+    -Condition (-not (Test-Path -LiteralPath $runCommandSuccessRestCall.BodyPath)) `
+    -Case 'Run Command body file cleanup after success'
+$runCommandSuccessBody = $runCommandSuccessRestCall.BodyDocument
+Assert-True `
+    -Condition ($runCommandSuccessBody['location'] -ceq $runCommandSuccessProbe.MachineLocation) `
+    -Case 'Run Command body uses machine location'
+Assert-True `
+    -Condition (
+        $runCommandSuccessBody['properties']['source']['script'] -ceq
+        $runCommandSuccessProbe.ScriptText
+    ) `
+    -Case 'Run Command multiline quoted script is preserved exactly in @file'
+Assert-True `
+    -Condition (
+        [int] $runCommandSuccessBody['properties']['timeoutInSeconds'] -eq
+        $runCommandSuccessProbe.TimeoutSeconds
+    ) `
+    -Case 'Run Command body preserves timeout'
+Assert-True `
+    -Condition ($runCommandSuccessBody['properties']['asyncExecution'] -eq $false) `
+    -Case 'Run Command body disables asynchronous execution'
+Assert-True `
+    -Condition (
+        @($runCommandSuccessProbe.Calls | Where-Object { $_.Kind -ceq 'Delete' }).Count -eq 1 -and
+        -not $runCommandSuccessProbe.ResourceExists
+    ) `
+    -Case 'Run Command resource cleanup after success'
+Assert-True `
+    -Condition (
+        @($runCommandSuccessProbe.Calls | ForEach-Object { $_.Arguments } |
+            Where-Object { $_ -ceq '--script' }).Count -eq 0
+    ) `
+    -Case 'Run Command production path never sends inline --script'
+
+$runCommandTruncatedProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'TruncatedScript'
+Assert-True `
+    -Condition (
+        $runCommandTruncatedProbe.ErrorMessage -ceq
+        "Run Command '$($runCommandTruncatedProbe.RunCommandName)' on 'ArcBox-Win2K22' did not preserve the exact requested script."
+    ) `
+    -Case 'Succeeded zero-exit Run Command rejects truncated script'
+Assert-True `
+    -Condition (
+        @($runCommandTruncatedProbe.Calls | Where-Object { $_.Kind -ceq 'Delete' }).Count -eq 1 -and
+        -not $runCommandTruncatedProbe.ResourceExists
+    ) `
+    -Case 'Run Command resource cleanup after script mismatch'
+Assert-True `
+    -Condition (-not (Test-Path -LiteralPath $runCommandTruncatedProbe.RestCall.BodyPath)) `
+    -Case 'Run Command body file cleanup after script mismatch'
+
+$runCommandCreateFailureProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'CreateFailure'
+Assert-True `
+    -Condition (
+        $runCommandCreateFailureProbe.ErrorMessage -ceq
+        "Unable to create Run Command '$($runCommandCreateFailureProbe.RunCommandName)' on 'ArcBox-Win2K22'."
+    ) `
+    -Case 'Run Command ARM creation failure propagation'
+Assert-True `
+    -Condition (-not (Test-Path -LiteralPath $runCommandCreateFailureProbe.RestCall.BodyPath)) `
+    -Case 'Run Command body file cleanup after ARM failure'
+Assert-True `
+    -Condition (
+        @($runCommandCreateFailureProbe.Calls | Where-Object { $_.Kind -ceq 'Delete' }).Count -eq 0 -and
+        -not $runCommandCreateFailureProbe.ResourceExists
+    ) `
+    -Case 'Failed Run Command creation leaves no resource'
+
 $orchestrationPath = Join-Path $repoRoot 'infra\arc-identity.bicep'
 $modulePath = Join-Path $repoRoot 'infra\core\arc-identity-monitoring.bicep'
 $orchestrationSource = Get-Content -LiteralPath $orchestrationPath -Raw
@@ -1955,15 +2246,41 @@ Assert-NotMatches -Source ($incidentSource + $recoverySource) -Pattern 'ConvertF
 Assert-Contains -Source $commonSource -Expected "'connectedmachine', 'run-command', 'delete'" -Case 'Run Command cleanup'
 Assert-Contains -Source $commonSource -Expected "[ValidatePattern('^identityops-" -Case 'Dedicated Run Command name guard'
 Assert-Contains -Source $commonSource -Expected '[switch] $AllowNotFound' -Case 'Non-destructive SRE resource preflight'
-Assert-Contains -Source $commonSource -Expected "'--timeout-in-seconds', [string] `$TimeoutSeconds" -Case 'Bounded guest Run Command execution'
-Assert-Contains -Source $commonSource -Expected "'--no-wait'" -Case 'Nonblocking Run Command control-plane operations'
+Assert-Contains -Source $commonSource -Expected 'timeoutInSeconds = $TimeoutSeconds' -Case 'Bounded guest Run Command execution'
+Assert-Contains -Source $commonSource -Expected 'asyncExecution = $false' -Case 'Synchronous Run Command execution'
+Assert-Contains -Source $commonSource -Expected '?api-version=2025-01-13' -Case 'Stable Run Command ARM API'
+Assert-Contains -Source $commonSource -Expected '-Body $runCommandBody' -Case 'Run Command uses shared ARM JSON helper'
+Assert-Contains -Source $commonSource -Expected '[StringComparison]::Ordinal' -Case 'Exact persisted Run Command script comparison'
+Assert-NotMatches `
+    -Source $commonSource `
+    -Pattern '(?m)^\s*[''"]?--script[''"]?\s*[, ]' `
+    -Case 'No production Run Command path sends script inline'
+Assert-NotMatches `
+    -Source $commonSource `
+    -Pattern '[''"]connectedmachine[''"]\s*,\s*[''"]run-command[''"]\s*,\s*[''"]create[''"]' `
+    -Case 'No legacy Run Command create transport'
 Assert-Contains -Source $commonSource -Expected '$cleanupDeadline = (Get-Date).AddSeconds(120)' -Case 'Bounded Run Command cleanup'
+$runCommandFunctionIndex = $commonSource.IndexOf(
+    'function Invoke-ArcIdentityRunCommand',
+    [StringComparison]::Ordinal
+)
+$runCommandDeadlineIndex = $commonSource.IndexOf(
+    '$deadline = (Get-Date).AddSeconds($TimeoutSeconds)',
+    $runCommandFunctionIndex,
+    [StringComparison]::Ordinal
+)
+$runCommandPutIndex = $commonSource.IndexOf(
+    "-Method 'put'",
+    $runCommandDeadlineIndex,
+    [StringComparison]::Ordinal
+)
 Assert-True `
     -Condition (
-        $commonSource.IndexOf('$deadline = (Get-Date).AddSeconds($TimeoutSeconds)', [StringComparison]::Ordinal) -lt
-        $commonSource.IndexOf("'connectedmachine', 'run-command', 'create'", [StringComparison]::Ordinal)
+        $runCommandFunctionIndex -ge 0 -and
+        $runCommandDeadlineIndex -gt $runCommandFunctionIndex -and
+        $runCommandPutIndex -gt $runCommandDeadlineIndex
     ) `
-    -Case 'Run Command deadline starts before create'
+    -Case 'Run Command deadline starts before ARM PUT'
 if ($IsWindows) {
     $windowsPowerShellProbe = @'
 $ErrorActionPreference = 'Stop'
