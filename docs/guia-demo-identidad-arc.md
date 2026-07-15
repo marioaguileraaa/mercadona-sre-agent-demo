@@ -6,6 +6,23 @@
 
 La demo muestra **Azure Arc, AMA, DCR, Log Analytics, Azure Monitor y Azure SRE Agent reales**, usando una fuente de eventos de identidad **sintética** porque los hosts no ejecutan AD FS ni AD DS. No presentar los eventos 4101/4102 como autenticaciones o fallos genuinos.
 
+## Ensayo validado (2026-07-15)
+
+Todos los correlation IDs, identificadores de instancia, incidentes e hilos de esta sección son sintéticos. Todas las horas están expresadas en UTC.
+
+| Evidencia | Resultado validado |
+|---|---|
+| Ejecución limpia | Correlation ID `SYNTH-ID-20260715T121108Z-C1D23058` |
+| Ráfaga 4101 | `ArcBox-Win2K22`: 12 eventos, 12 secuencias distintas, primero a las 12:12:06Z. `ArcBox-Win2K25`: 12 eventos, 12 secuencias distintas, primero a las 12:13:24Z |
+| Recuperación 4102 | Un marcador por host: Win2K22 a las 12:33:42Z y Win2K25 a las 12:36:03Z |
+| Alerta | Instancia `d5cb21c6-07dc-5fb2-aa53-a116b1ec000e`, Sev2: `Fired` 12:13:29Z y `Resolved` 12:29:16Z, antes de ejecutar recovery |
+| Azure SRE Agent | La nueva instancia se fusionó en el hilo existente `fd9d78e7-17b9-4442-bd85-2d479a888f52`; `mergedAlertCount=2`, con el nuevo incident ID asociado. Estado final `Complete/resolved`, `agentMode=Review`, sin acciones `critical` ni `warning` |
+| Interpretación del agente | La investigación automática anterior del mismo hilo identificó correctamente los eventos sintéticos, confirmó Arc/AMA sanos, concluyó que no había preocupación real y no propuso remediación de identidad. La ejecución de 24 eventos fue un merge/deduplicación de alerta, no una investigación independiente nueva |
+| Cleanup | Ambas máquinas `Connected`; cero Run Commands `identityops-*` |
+| Verificador final | DCR exacta solo en Win2K22/Win2K25, otras asociaciones preservadas, AMA/Heartbeat/InsightsMetrics frescos, dos alertas Sev2 con auto-resolve, RBAC mínimo, conector/skill/subagente/filtro/tarea presentes y agente `Review/Low` |
+| Hotfixes incluidos | PR #17 `88f5278c6e93f8239163d11f0cca84673caa5727` (Run Command PUT ARM `2025-01-13`, JSON `@file` UTF-8 sin BOM y script exacto); PR #18 `aeea96280835ea11f3bae971b0baa5623b86ff8d` (shape source top-level/nested); PR #19 `4d1e0b6c43160e16bf60eaeb2f56441b0a864e96` (LAW autoritativo e idempotencia/recovery con preflight global de ambos hosts) |
+| Estado del repositorio | PR #16 de fixtures obsoletos cerrada; ninguna PR abierta antes de esta actualización documental |
+
 ## Preparación del día después de la configuración inicial
 
 1. Confirmar la ejecución de `la-start-arcbox-client`, programada diariamente a las 08:00 en `Romance Standard Time`; iniciarla por el procedimiento Jumpstart solo si fuera necesario.
@@ -41,6 +58,14 @@ Esta secuencia no cambia el frontend, la API retail, el escenario de memoria ni 
 Antes de esta configuración inicial es normal que LAW tenga Heartbeat e `InsightsMetrics`, pero no `Perf` ni `Event`. `Perf` permanece vacío por diseño: la DCR nueva añade solo `Event` y reutiliza las métricas de `MSVMI-ama-vmi-default-dcr`. El action group existente permanece habilitado sin receptores y no notifica al agente; el filtro de la plataforma Azure Monitor del SRE Agent detecta las Sev2.
 
 La alerta de frescura se suprime fuera de la jornada esperada: 08:20 `Europe/Madrid`, después de 20 minutos de gracia, hasta el autoapagado `shutdown-computevm-ArcBox-Client` de las 18:00 UTC. `Europe/Madrid` aplica CET/CEST automáticamente; no presentar la ausencia nocturna de Heartbeat/InsightsMetrics como incidente.
+
+## Checklist inmediato antes de la demo
+
+- Ejecutar `.\scripts\verify-arc-identity.ps1` y exigir resultado correcto.
+- Confirmar `ArcBox-Win2K22` y `ArcBox-Win2K25` en `Connected`.
+- Confirmar cero Run Commands `identityops-*`.
+- Usar un correlation ID sintético nuevo.
+- Conservar Azure SRE Agent en `Review/Low`.
 
 ## Guion de 15 minutos
 
@@ -93,6 +118,8 @@ Anotar el correlation ID. La ejecución predeterminada produce 12 eventos por ho
 
 Si el agente trata la señal como un ataque real o propone cambios de identidad, rechazar la salida y señalar el fallo de gobierno.
 
+En demos repetidas, Azure SRE Agent puede fusionar una alerta nueva de la misma regla en el hilo existente. Comprobar que el incident ID nuevo esté asociado y revisar `mergedAlertCount`; no esperar necesariamente un thread ID nuevo. En una primera ejecución limpia sí debe aparecer la investigación automática. Nunca forzar remediación para producir otra investigación.
+
 ### 5. Recuperar
 
 ```powershell
@@ -100,7 +127,7 @@ Si el agente trata la señal como un ataque real o propone cambios de identidad,
   -CorrelationId 'SYNTH-ID-REEMPLAZAR'
 ```
 
-Mostrar dos eventos 4102 agregados, uno por host, y esperar el auto-resolve.
+La alerta se auto-resuelve cuando los eventos 4101 salen de la ventana móvil de cinco minutos. Los dos eventos 4102, uno por host, son marcadores de recuperación auditables e idempotentes; no forman parte de la condición KQL que causa el auto-resolve. Mostrar ambos marcadores y confirmar por separado el estado de la alerta. En el ensayo validado, la alerta se resolvió antes de ejecutar recovery.
 
 ### 6. Mostrar el informe
 
