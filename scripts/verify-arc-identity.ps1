@@ -385,8 +385,11 @@ function Assert-ArcIdentityAlertRule {
         (Get-ArcIdentityOptionalPropertyValue -InputObject $resolveConfiguration -PropertyName 'timeToResolve') -ne 'PT10M') {
         throw "Alert '$AlertName' does not preserve its deterministic evaluation and resolution timing."
     }
-    if ($null -ne $ExpectedOverrideQueryTimeRange -and
-        $properties.overrideQueryTimeRange -ne $ExpectedOverrideQueryTimeRange) {
+    $overrideQueryTimeRange = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'overrideQueryTimeRange'
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedOverrideQueryTimeRange) -and
+        $overrideQueryTimeRange -ne $ExpectedOverrideQueryTimeRange) {
         throw "Alert '$AlertName' does not preserve overrideQueryTimeRange '$ExpectedOverrideQueryTimeRange'."
     }
 
