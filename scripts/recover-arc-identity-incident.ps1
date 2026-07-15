@@ -23,29 +23,55 @@ Assert-ArcIdentityAzureContext `
     -SubscriptionId $SubscriptionId `
     -TenantId $TenantId `
     -ResourceGroupNames @($ArcResourceGroupName)
+$targetResources = @(
+    Get-ArcIdentitySyntheticTargetResources `
+        -SubscriptionId $SubscriptionId `
+        -ResourceGroupName $ArcResourceGroupName `
+        -MachineNames $MachineNames
+)
 $null = Get-ArcIdentityTargetMachines `
     -SubscriptionId $SubscriptionId `
     -ResourceGroupName $ArcResourceGroupName `
     -Location $Location `
-    -MachineNames $MachineNames
-foreach ($machineName in $MachineNames) {
+    -MachineNames @($targetResources.MachineName)
+foreach ($targetResource in $targetResources) {
     $null = Assert-ArcIdentityAmaExtension `
         -SubscriptionId $SubscriptionId `
         -ResourceGroupName $ArcResourceGroupName `
-        -MachineName $machineName
+        -MachineName $targetResource.MachineName
 }
 
 if (-not $PSCmdlet.ShouldProcess(
-        ($MachineNames -join ', '),
+        ($targetResources.MachineName -join ', '),
         "Emit one idempotent synthetic recovery event per Arc machine for correlationId=$CorrelationId"
     )) {
     return
 }
 
+$workspace = Invoke-ArcIdentityAzJson `
+    -Arguments @(
+        'monitor', 'log-analytics', 'workspace', 'show',
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ArcResourceGroupName,
+        '--workspace-name', $WorkspaceName,
+        '--output', 'json'
+    ) `
+    -FailureMessage "Unable to read Log Analytics workspace '$WorkspaceName'."
+$workspaceCustomerId = Get-ArcIdentityOptionalPropertyValue `
+    -InputObject $workspace `
+    -PropertyName 'customerId'
+if ($workspaceCustomerId -isnot [string] -or
+    [string]::IsNullOrWhiteSpace([string] $workspaceCustomerId)) {
+    throw "Workspace '$WorkspaceName' did not expose a customerId."
+}
+
 $correlationIdLiteral = $CorrelationId | ConvertTo-Json -Compress
+$stateResolverDefinition = "function Resolve-ArcIdentitySyntheticEventState {`n$((Get-Command Resolve-ArcIdentitySyntheticEventState).Definition)`n}"
 $remoteScriptTemplate = @'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+__STATE_RESOLVER__
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if ($null -eq $identity.User -or $identity.User.Value -ne 'S-1-5-18') {
@@ -57,12 +83,23 @@ $logName = 'Application'
 $correlationId = __CORRELATION_ID__
 $incidentEventId = 4101
 $recoveryEventId = 4102
+$authoritativeIncidentCount = __AUTHORITATIVE_INCIDENT_COUNT__
+$authoritativeRecoveryCount = __AUTHORITATIVE_RECOVERY_COUNT__
 $correlationStart = [DateTimeOffset]::ParseExact(
     $correlationId.Substring(9, 16),
     "yyyyMMdd'T'HHmmss'Z'",
     [Globalization.CultureInfo]::InvariantCulture,
     [Globalization.DateTimeStyles]::AssumeUniversal
-).UtcDateTime.AddMinutes(-5)
+).UtcDateTime
+$correlationStart = [datetime]::new(
+    $correlationStart.Year,
+    $correlationStart.Month,
+    $correlationStart.Day,
+    $correlationStart.Hour,
+    0,
+    0,
+    [DateTimeKind]::Utc
+)
 
 if (-not [Diagnostics.EventLog]::SourceExists($source)) {
     throw "Synthetic event source '$source' does not exist. Start the bounded incident before recovery."
@@ -85,7 +122,8 @@ try {
             $candidateEvent = $_
             $existingPayload = $candidateEvent.Message | ConvertFrom-Json
             if ($existingPayload.demoSynthetic -eq $true -and
-                $existingPayload.correlationId -eq $correlationId) {
+                $existingPayload.correlationId -eq $correlationId -and
+                $existingPayload.scenario -eq 'adfs-token-failure-burst') {
                 if ($candidateEvent.Id -eq $incidentEventId -and
                     $existingPayload.eventType -eq 'SyntheticAdfsTokenFailure') {
                     $incidentCount++
@@ -102,21 +140,23 @@ try {
     }
 }
 
-if ($incidentCount -eq 0) {
-    throw "No bounded synthetic incident events exist for correlation '$correlationId'."
-}
-if ($recoveryCount -gt 1) {
-    throw "Correlation '$correlationId' has more than one recovery event."
-}
+$state = Resolve-ArcIdentitySyntheticEventState `
+    -Operation Recover `
+    -LocalIncidentCount $incidentCount `
+    -LocalRecoveryCount $recoveryCount `
+    -AuthoritativeIncidentCount $authoritativeIncidentCount `
+    -AuthoritativeRecoveryCount $authoritativeRecoveryCount `
+    -IncidentBound 20 `
+    -CorrelationId $correlationId
 
-if ($recoveryCount -eq 0) {
+if ($state.EmitCount -eq 1) {
     $payload = [ordered]@{
         schemaVersion = 1
         demoSynthetic = $true
         correlationId = $correlationId
         scenario = 'adfs-token-failure-burst'
         eventType = 'SyntheticAdfsRecovery'
-        priorSyntheticFailureEvents = $incidentCount
+        priorSyntheticFailureEvents = $state.ExistingIncidentCount
         machine = $env:COMPUTERNAME
         emittedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
         rootCauseClue = 'Synthetic identity dependency restored; no real identity service was changed.'
@@ -133,13 +173,40 @@ if ($recoveryCount -eq 0) {
     demoSynthetic = $true
     correlationId = $correlationId
     eventId = $recoveryEventId
-    priorSyntheticFailureEvents = $incidentCount
-    recoveryAlreadyPresent = $recoveryCount -eq 1
+    priorSyntheticFailureEvents = $state.ExistingIncidentCount
+    recoveryAlreadyPresent = $state.ExistingRecoveryCount -eq 1
 } | ConvertTo-Json -Compress
 '@
-$remoteScript = $remoteScriptTemplate.Replace('__CORRELATION_ID__', $correlationIdLiteral)
 
-foreach ($machineName in $MachineNames) {
+foreach ($targetResource in $targetResources) {
+    $authoritativeRows = @(
+        Get-ArcIdentitySyntheticEventCountRows `
+            -SubscriptionId $SubscriptionId `
+            -WorkspaceCustomerId $workspaceCustomerId `
+            -CorrelationId $CorrelationId `
+            -TargetResources $targetResources
+    )
+    Assert-ArcIdentitySyntheticLawSnapshot `
+        -Operation Recover `
+        -Rows $authoritativeRows `
+        -IncidentBound 20 `
+        -CorrelationId $CorrelationId
+    $authoritativeCount = @(
+        $authoritativeRows | Where-Object {
+            [string]::Equals(
+                [string] $_.NormalizedResourceId,
+                [string] $targetResource.NormalizedResourceId,
+                [StringComparison]::Ordinal
+            )
+        }
+    )[0]
+
+    $remoteScript = $remoteScriptTemplate.
+        Replace('__STATE_RESOLVER__', $stateResolverDefinition).
+        Replace('__CORRELATION_ID__', $correlationIdLiteral).
+        Replace('__AUTHORITATIVE_INCIDENT_COUNT__', [string] $authoritativeCount.IncidentCount).
+        Replace('__AUTHORITATIVE_RECOVERY_COUNT__', [string] $authoritativeCount.RecoveryCount)
+    $machineName = [string] $targetResource.MachineName
     $machineSlug = ($machineName.ToLowerInvariant() -replace '[^a-z0-9]', '')
     $runCommandName = "identityops-r-$($machineSlug.Substring(0, [Math]::Min(12, $machineSlug.Length)))-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
     $null = Invoke-ArcIdentityRunCommand `
@@ -151,38 +218,26 @@ foreach ($machineName in $MachineNames) {
     Write-Host "Synthetic recovery event completed on '$machineName'."
 }
 
-$workspace = Invoke-ArcIdentityAzJson `
-    -Arguments @(
-        'monitor', 'log-analytics', 'workspace', 'show',
-        '--subscription', $SubscriptionId,
-        '--resource-group', $ArcResourceGroupName,
-        '--workspace-name', $WorkspaceName,
-        '--output', 'json'
-    ) `
-    -FailureMessage "Unable to read Log Analytics workspace '$WorkspaceName'."
-$correlationIdKql = $CorrelationId.Replace("'", "''")
-$verificationQuery = @"
-Event
-| where TimeGenerated >= ago(30m)
-| where EventLog == "Application" and Source == "Mercadona.IdentityOps" and EventID == 4102
-| where RenderedDescription contains '"demoSynthetic":true'
-| where RenderedDescription contains "$correlationIdKql"
-| summarize RecoveryEvents=count(), MachineCount=dcount(tolower(_ResourceId))
-"@
 $deadline = (Get-Date).AddSeconds($IngestionTimeoutSeconds)
 $ingested = $false
 do {
-    $rows = @(
-        Get-ArcIdentityResponseItems -Response (
-            Invoke-ArcIdentityLogAnalyticsQuery `
-                -SubscriptionId $SubscriptionId `
-                -WorkspaceCustomerId ([string] $workspace.customerId) `
-                -Query $verificationQuery
-        ) -PropertyNames @('tables', 'value')
+    $verificationRows = @(
+        Get-ArcIdentitySyntheticEventCountRows `
+            -SubscriptionId $SubscriptionId `
+            -WorkspaceCustomerId $workspaceCustomerId `
+            -CorrelationId $CorrelationId `
+            -TargetResources $targetResources
     )
-    if ($rows.Count -eq 1 -and
-        [int] $rows[0].RecoveryEvents -eq $MachineNames.Count -and
-        [int] $rows[0].MachineCount -eq $MachineNames.Count) {
+    if ($verificationRows | Where-Object { [int] $_.RecoveryCount -gt 1 }) {
+        throw "Log Analytics exposed more than one recovery per target for correlation '$CorrelationId'."
+    }
+    $exactRows = @(
+        $verificationRows | Where-Object {
+            [int] $_.IncidentCount -gt 0 -and
+            [int] $_.RecoveryCount -eq 1
+        }
+    )
+    if ($exactRows.Count -eq $targetResources.Count) {
         $ingested = $true
         break
     }
@@ -192,4 +247,4 @@ if (-not $ingested) {
     throw "Log Analytics did not expose exactly one recovery event per target machine within $IngestionTimeoutSeconds seconds."
 }
 
-Write-Host "Synthetic identity recovery verified. correlationId=$CorrelationId recoveryEvents=$($MachineNames.Count)"
+Write-Host "Synthetic identity recovery verified. correlationId=$CorrelationId recoveryEvents=$($targetResources.Count) machines=$($targetResources.Count)"
