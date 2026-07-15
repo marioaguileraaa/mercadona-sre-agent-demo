@@ -1108,23 +1108,48 @@ function Invoke-ArcIdentityRunCommand {
         throw "Run Command '$RunCommandName' already exists on '$MachineName'; refusing to overwrite it."
     }
 
+    $machine = Invoke-ArcIdentityAzJson `
+        -Arguments @(
+            'connectedmachine', 'show',
+            '--subscription', $SubscriptionId,
+            '--resource-group', $ResourceGroupName,
+            '--name', $MachineName,
+            '--output', 'json'
+        ) `
+        -FailureMessage "Unable to read Arc machine '$MachineName' before creating its Run Command."
+    $machineResourceId = Get-ArcIdentityMachineResourceId `
+        -SubscriptionId $SubscriptionId `
+        -ResourceGroupName $ResourceGroupName `
+        -MachineName $MachineName
+    $machineLocation = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $machine `
+        -PropertyName 'location'
+    if ([string]::IsNullOrWhiteSpace([string] $machineLocation)) {
+        throw "Arc machine '$MachineName' must expose a nonblank location for Run Command creation."
+    }
+
+    $runCommandUrl = "https://management.azure.com${machineResourceId}/runCommands/${RunCommandName}?api-version=2025-01-13"
+    $runCommandBody = [ordered]@{
+        location = [string] $machineLocation
+        properties = [ordered]@{
+            source = [ordered]@{
+                script = $ScriptText
+            }
+            timeoutInSeconds = $TimeoutSeconds
+            asyncExecution = $false
+        }
+    }
     $commandError = $null
     $cleanupError = $null
     $result = $null
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     try {
-        Invoke-ArcIdentityAzNoOutput `
-            -Arguments @(
-                'connectedmachine', 'run-command', 'create',
-                '--subscription', $SubscriptionId,
-                '--resource-group', $ResourceGroupName,
-                '--machine-name', $MachineName,
-                '--name', $RunCommandName,
-                '--script', $ScriptText,
-                '--timeout-in-seconds', [string] $TimeoutSeconds,
-                '--no-wait',
-                '--output', 'none'
-            ) `
+        Invoke-ArcIdentityArmRestWithJsonBody `
+            -Method 'put' `
+            -Url $runCommandUrl `
+            -Headers @('Content-Type=application/json') `
+            -Body $runCommandBody `
+            -Output 'none' `
             -FailureMessage "Unable to create Run Command '$RunCommandName' on '$MachineName'."
 
         do {
@@ -1159,6 +1184,20 @@ function Invoke-ArcIdentityRunCommand {
                 ) `
                 -FailureMessage "Unable to read Run Command '$RunCommandName' on '$MachineName'."
             $properties = Get-ArcIdentityOptionalPropertyValue -InputObject $command -PropertyName 'properties'
+            $source = Get-ArcIdentityOptionalPropertyValue `
+                -InputObject $properties `
+                -PropertyName 'source'
+            $persistedScript = Get-ArcIdentityOptionalPropertyValue `
+                -InputObject $source `
+                -PropertyName 'script'
+            if ($null -eq $persistedScript -or
+                -not [string]::Equals(
+                    [string] $persistedScript,
+                    $ScriptText,
+                    [StringComparison]::Ordinal
+                )) {
+                throw "Run Command '$RunCommandName' on '$MachineName' did not preserve the exact requested script."
+            }
             $instanceView = Get-ArcIdentityFirstPropertyValue `
                 -InputObjects @($command, $properties) `
                 -PropertyNames @('instanceView')
