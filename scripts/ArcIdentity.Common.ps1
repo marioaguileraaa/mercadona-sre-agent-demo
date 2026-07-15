@@ -1071,13 +1071,13 @@ function Resolve-ArcIdentitySyntheticEventState {
         [ValidateSet('Start', 'Recover')]
         [string] $Operation,
         [Parameter(Mandatory)]
-        [int] $LocalIncidentCount,
+        [long] $LocalIncidentCount,
         [Parameter(Mandatory)]
-        [int] $LocalRecoveryCount,
+        [long] $LocalRecoveryCount,
         [Parameter(Mandatory)]
-        [int] $AuthoritativeIncidentCount,
+        [long] $AuthoritativeIncidentCount,
         [Parameter(Mandatory)]
-        [int] $AuthoritativeRecoveryCount,
+        [long] $AuthoritativeRecoveryCount,
         [Parameter(Mandatory)]
         [ValidateRange(1, 100)]
         [int] $IncidentBound,
@@ -1137,6 +1137,49 @@ function Resolve-ArcIdentitySyntheticEventState {
         ExistingIncidentCount = $existingIncidentCount
         ExistingRecoveryCount = $existingRecoveryCount
         EmitCount = $emitCount
+    }
+}
+
+function Assert-ArcIdentitySyntheticLawSnapshot {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Start', 'Recover')]
+        [string] $Operation,
+        [Parameter(Mandatory)]
+        [ValidateCount(2, 2)]
+        [object[]] $Rows,
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 100)]
+        [int] $IncidentBound,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $CorrelationId
+    )
+
+    foreach ($row in $Rows) {
+        $resourceId = Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $row `
+            -PropertyName 'ResourceId'
+        $incidentCount = Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $row `
+            -PropertyName 'IncidentCount'
+        $recoveryCount = Get-ArcIdentityOptionalPropertyValue `
+            -InputObject $row `
+            -PropertyName 'RecoveryCount'
+        if ($resourceId -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string] $resourceId) -or
+            $null -eq $incidentCount -or
+            $null -eq $recoveryCount) {
+            throw 'LAW preflight requires two complete synthetic target count rows.'
+        }
+        $null = Resolve-ArcIdentitySyntheticEventState `
+            -Operation $Operation `
+            -LocalIncidentCount 0 `
+            -LocalRecoveryCount 0 `
+            -AuthoritativeIncidentCount ([long] $incidentCount) `
+            -AuthoritativeRecoveryCount ([long] $recoveryCount) `
+            -IncidentBound $IncidentBound `
+            -CorrelationId $CorrelationId
     }
 }
 

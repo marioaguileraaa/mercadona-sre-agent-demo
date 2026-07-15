@@ -1503,6 +1503,242 @@ Assert-True `
     ) `
     -Case 'Recovery rejects more than one authoritative LAW recovery'
 
+function Invoke-ArcIdentityMutationScriptPreflightProbe {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Start', 'Recover')]
+        [string] $Operation,
+        [Parameter(Mandatory)]
+        [object[]] $Rows,
+        [Parameter(Mandatory)]
+        [string] $CorrelationId
+    )
+
+    $workspaceCustomerId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    $state = @{
+        QueryCalls = 0
+        RunCommandCalls = 0
+    }
+
+    function az {
+        [string[]] $azArguments = @($args | ForEach-Object { [string] $_ })
+        $global:LASTEXITCODE = 0
+
+        if ($azArguments[0] -ceq 'account' -and $azArguments[1] -ceq 'show') {
+            return ConvertTo-Json -InputObject ([ordered]@{
+                    id = $syntheticSubscriptionId
+                    tenantId = '9b1d3cd8-5db7-4564-905d-4d2eba7b66d5'
+                    name = 'Synthetic global preflight probe'
+                }) -Compress
+        }
+        if ($azArguments[0] -ceq 'group' -and $azArguments[1] -ceq 'show') {
+            return ConvertTo-Json -InputObject ([ordered]@{
+                    name = $syntheticResourceGroupName
+                }) -Compress
+        }
+        if ($azArguments[0] -ceq 'connectedmachine' -and
+            $azArguments[1] -ceq 'list') {
+            return ConvertTo-Json -InputObject @(
+                [ordered]@{
+                    name = 'ArcBox-Win2K22'
+                    location = 'westeurope'
+                    properties = [ordered]@{
+                        status = 'Connected'
+                        osType = 'Windows'
+                    }
+                },
+                [ordered]@{
+                    name = 'ArcBox-Win2K25'
+                    location = 'westeurope'
+                    properties = [ordered]@{
+                        status = 'Connected'
+                        osType = 'Windows'
+                    }
+                }
+            ) -Depth 10 -Compress
+        }
+        if ($azArguments[0] -ceq 'connectedmachine' -and
+            $azArguments[1] -ceq 'extension' -and
+            $azArguments[2] -ceq 'show') {
+            return ConvertTo-Json -InputObject ([ordered]@{
+                    properties = [ordered]@{
+                        provisioningState = 'Succeeded'
+                    }
+                }) -Compress
+        }
+        if ($azArguments[0] -ceq 'monitor' -and
+            $azArguments[1] -ceq 'log-analytics' -and
+            $azArguments[2] -ceq 'workspace' -and
+            $azArguments[3] -ceq 'show') {
+            return ConvertTo-Json -InputObject ([ordered]@{
+                    customerId = $workspaceCustomerId
+                }) -Compress
+        }
+        if ($azArguments[0] -ceq 'rest') {
+            $urlIndex = [Array]::IndexOf($azArguments, '--url')
+            $bodyIndex = [Array]::IndexOf($azArguments, '--body')
+            if ($urlIndex -ge 0 -and
+                $urlIndex -lt ($azArguments.Count - 1) -and
+                $azArguments[$urlIndex + 1] -ceq
+                "https://api.loganalytics.azure.com/v1/workspaces/$workspaceCustomerId/query") {
+                if ($bodyIndex -lt 0 -or $bodyIndex -ge ($azArguments.Count - 1)) {
+                    throw 'Synthetic global preflight query did not use a body argument.'
+                }
+                $bodyArgument = $azArguments[$bodyIndex + 1]
+                if (-not $bodyArgument.StartsWith('@', [StringComparison]::Ordinal) -or
+                    -not (Test-Path -LiteralPath $bodyArgument.Substring(1) -PathType Leaf)) {
+                    throw 'Synthetic global preflight query did not use an existing @file body.'
+                }
+                $state.QueryCalls++
+                $responseRows = [System.Collections.Generic.List[object]]::new()
+                foreach ($row in $Rows) {
+                    $responseRows.Add([object[]]@(
+                            [string] $row.ResourceId,
+                            [long] $row.IncidentCount,
+                            [long] $row.RecoveryCount
+                        ))
+                }
+                return ConvertTo-Json -InputObject ([ordered]@{
+                        tables = @(
+                            [ordered]@{
+                                name = 'PrimaryResult'
+                                columns = @(
+                                    [ordered]@{ name = 'ResourceId'; type = 'string' },
+                                    [ordered]@{ name = 'IncidentCount'; type = 'long' },
+                                    [ordered]@{ name = 'RecoveryCount'; type = 'long' }
+                                )
+                                rows = $responseRows.ToArray()
+                            }
+                        )
+                    }) -Depth 10 -Compress
+            }
+            $state.RunCommandCalls++
+            throw 'The production script reached a Run Command ARM mutation.'
+        }
+        if ($azArguments[0] -ceq 'connectedmachine' -and
+            $azArguments[1] -ceq 'run-command') {
+            $state.RunCommandCalls++
+            throw 'The production script reached a Run Command mutation.'
+        }
+
+        throw "Unexpected fake Azure CLI call: $($azArguments -join ' ')"
+    }
+
+    $errorMessage = $null
+    try {
+        if ($Operation -ceq 'Start') {
+            & (Join-Path $PSScriptRoot 'start-arc-identity-incident.ps1') `
+                -CorrelationId $CorrelationId `
+                -EventsPerMachine 12 `
+                -IngestionTimeoutSeconds 60 `
+                -Confirm:$false 6>$null
+        } else {
+            & (Join-Path $PSScriptRoot 'recover-arc-identity-incident.ps1') `
+                -CorrelationId $CorrelationId `
+                -IngestionTimeoutSeconds 60 `
+                -Confirm:$false 6>$null
+        }
+    } catch {
+        $errorMessage = $_.Exception.Message
+    } finally {
+        $global:LASTEXITCODE = 0
+    }
+    return [pscustomobject]@{
+        QueryCalls = $state.QueryCalls
+        RunCommandCalls = $state.RunCommandCalls
+        ErrorMessage = $errorMessage
+    }
+}
+
+$globalPreflightCases = @(
+    [pscustomobject]@{
+        Name = 'Start second target recovery blocks first mutation'
+        Operation = 'Start'
+        Rows = @(
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[0]
+                IncidentCount = 0
+                RecoveryCount = 0
+            },
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[1]
+                IncidentCount = 12
+                RecoveryCount = 1
+            }
+        )
+        ExpectedError = "Correlation '$syntheticCorrelationId' already has a synthetic recovery event; refusing to reopen it."
+    },
+    [pscustomobject]@{
+        Name = 'Start second target over bound blocks first mutation'
+        Operation = 'Start'
+        Rows = @(
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[0]
+                IncidentCount = 0
+                RecoveryCount = 0
+            },
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[1]
+                IncidentCount = 13
+                RecoveryCount = 0
+            }
+        )
+        ExpectedError = "Log Analytics has 13 incident events for correlation '$syntheticCorrelationId', above the bounded count 12."
+    },
+    [pscustomobject]@{
+        Name = 'Recovery second target missing incident blocks first mutation'
+        Operation = 'Recover'
+        Rows = @(
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[0]
+                IncidentCount = 12
+                RecoveryCount = 0
+            },
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[1]
+                IncidentCount = 0
+                RecoveryCount = 0
+            }
+        )
+        ExpectedError = "Log Analytics has no authoritative synthetic incident event for correlation '$syntheticCorrelationId'."
+    },
+    [pscustomobject]@{
+        Name = 'Recovery second target duplicate recovery blocks first mutation'
+        Operation = 'Recover'
+        Rows = @(
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[0]
+                IncidentCount = 12
+                RecoveryCount = 0
+            },
+            [pscustomobject]@{
+                ResourceId = $expectedSyntheticResourceIds[1]
+                IncidentCount = 12
+                RecoveryCount = 2
+            }
+        )
+        ExpectedError = "Log Analytics has more than one synthetic recovery event for correlation '$syntheticCorrelationId'."
+    }
+)
+foreach ($globalPreflightCase in $globalPreflightCases) {
+    $globalPreflightProbe = Invoke-ArcIdentityMutationScriptPreflightProbe `
+        -Operation $globalPreflightCase.Operation `
+        -Rows $globalPreflightCase.Rows `
+        -CorrelationId $syntheticCorrelationId
+    Assert-True `
+        -Condition (
+            $globalPreflightProbe.QueryCalls -eq 1 -and
+            $globalPreflightProbe.RunCommandCalls -eq 0 -and
+            $globalPreflightProbe.ErrorMessage -ceq $globalPreflightCase.ExpectedError
+        ) `
+        -Case (
+            "$($globalPreflightCase.Name) " +
+            "(queries=$($globalPreflightProbe.QueryCalls), " +
+            "runCommands=$($globalPreflightProbe.RunCommandCalls), " +
+            "error='$($globalPreflightProbe.ErrorMessage)')"
+        )
+}
+
 $originalLogAnalyticsQueryFunction = (Get-Item Function:\Invoke-ArcIdentityLogAnalyticsQuery).ScriptBlock
 $script:capturedSyntheticCountQuery = $null
 try {
@@ -2685,6 +2921,16 @@ foreach ($source in @($incidentSource, $recoverySource)) {
         '$authoritativeRows = @(',
         [StringComparison]::Ordinal
     )
+    $globalPreflightIndex = $source.IndexOf(
+        'Assert-ArcIdentitySyntheticLawSnapshot `',
+        $preMutationQueryIndex,
+        [StringComparison]::Ordinal
+    )
+    $currentTargetSelectionIndex = $source.IndexOf(
+        '$authoritativeCount = @(',
+        $globalPreflightIndex,
+        [StringComparison]::Ordinal
+    )
     $runCommandMutationIndex = $source.IndexOf(
         '$null = Invoke-ArcIdentityRunCommand',
         [StringComparison]::Ordinal
@@ -2692,9 +2938,11 @@ foreach ($source in @($incidentSource, $recoverySource)) {
     Assert-True `
         -Condition (
             $preMutationQueryIndex -ge 0 -and
-            $preMutationQueryIndex -lt $runCommandMutationIndex
+            $preMutationQueryIndex -lt $globalPreflightIndex -and
+            $globalPreflightIndex -lt $currentTargetSelectionIndex -and
+            $currentTargetSelectionIndex -lt $runCommandMutationIndex
         ) `
-        -Case 'LAW authority query precedes each possible Run Command mutation'
+        -Case 'Global two-target LAW preflight precedes current-row selection and Run Command mutation'
 }
 Assert-Contains -Source $commonSource -Expected 'TimeGenerated >= datetime($correlationHourUtc)' -Case 'LAW query starts at correlation-derived UTC hour'
 Assert-Contains -Source $commonSource -Expected 'where tolower(_ResourceId) in ($resourceIdList)' -Case 'LAW query exact normalized resource filter'

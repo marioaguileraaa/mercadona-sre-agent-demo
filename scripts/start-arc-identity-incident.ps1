@@ -194,6 +194,11 @@ foreach ($targetResource in $targetResources) {
             -CorrelationId $CorrelationId `
             -TargetResources $targetResources
     )
+    Assert-ArcIdentitySyntheticLawSnapshot `
+        -Operation Start `
+        -Rows $authoritativeRows `
+        -IncidentBound $EventsPerMachine `
+        -CorrelationId $CorrelationId
     $authoritativeCount = @(
         $authoritativeRows | Where-Object {
             [string]::Equals(
@@ -203,14 +208,6 @@ foreach ($targetResource in $targetResources) {
             )
         }
     )[0]
-    $null = Resolve-ArcIdentitySyntheticEventState `
-        -Operation Start `
-        -LocalIncidentCount 0 `
-        -LocalRecoveryCount 0 `
-        -AuthoritativeIncidentCount ([int] $authoritativeCount.IncidentCount) `
-        -AuthoritativeRecoveryCount ([int] $authoritativeCount.RecoveryCount) `
-        -IncidentBound $EventsPerMachine `
-        -CorrelationId $CorrelationId
 
     $remoteScript = $remoteScriptTemplate.
         Replace('__STATE_RESOLVER__', $stateResolverDefinition).
