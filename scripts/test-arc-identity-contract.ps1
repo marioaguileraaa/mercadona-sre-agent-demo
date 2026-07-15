@@ -2487,89 +2487,263 @@ foreach ($scheduledTaskStateCase in $scheduledTaskStateCases) {
             -Case "Verifier rejects scheduled task: $($scheduledTaskStateCase.Name)"
     }
 }
-$alertOverrideAssignments = @(
+$alertRuleFunctions = @(
     $verifyContractAst.FindAll({
         param($node)
-        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left.Extent.Text -ceq '$overrideQueryTimeRange'
-    }, $true)
-)
-$alertOverrideChecks = @(
-    $verifyContractAst.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.IfStatementAst] -and
-        $node.Extent.Text.Contains(
-            'does not preserve overrideQueryTimeRange',
-            [StringComparison]::Ordinal
-        )
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-ArcIdentityAlertRule'
     }, $true)
 )
 Assert-True `
-    -Condition (
-        $alertOverrideAssignments.Count -eq 1 -and
-        $alertOverrideChecks.Count -eq 1
-    ) `
-    -Case 'Verifier has one production overrideQueryTimeRange contract'
-$alertOverrideContractStart = $alertOverrideAssignments[0].Extent.StartOffset
-$alertOverrideContractEnd = $alertOverrideChecks[0].Extent.EndOffset
-$alertOverrideValidationContract = [scriptblock]::Create(
-    @'
+    -Condition ($alertRuleFunctions.Count -eq 1) `
+    -Case 'Verifier has one production alert rule contract'
+$alertRuleValidationContractSource = @'
 param(
+    [Parameter(Mandatory)]
+    [object] $Alert,
+    [Parameter(Mandatory)]
+    [string] $AlertName,
+    [Parameter(Mandatory)]
+    [string[]] $RequiredQueryFragments,
+    [Parameter(Mandatory)]
+    [int] $ExpectedThreshold,
+    [Parameter(Mandatory)]
+    [string] $ExpectedEvaluationFrequency,
     [AllowNull()]
-    [object] $properties,
-    [AllowNull()]
-    [string] $ExpectedOverrideQueryTimeRange,
-    [string] $AlertName = 'alert-freshness-probe'
+    [string] $ExpectedOverrideQueryTimeRange
 )
-'@ +
-    $verifySource.Substring(
-        $alertOverrideContractStart,
-        $alertOverrideContractEnd - $alertOverrideContractStart
+
+$SubscriptionId = '11111111-2222-3333-4444-555555555555'
+$ArcResourceGroupName = 'rg-arc-alert-probe'
+$workspaceResourceId = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-alert-probe/providers/Microsoft.OperationalInsights/workspaces/law-alert-probe'
+$actionGroupResourceId = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-sre-alert-probe/providers/Microsoft.Insights/actionGroups/ag-alert-probe'
+
+function Invoke-ArcIdentityAzJson {
+    param(
+        [Parameter(Mandatory)]
+        [string[]] $Arguments,
+        [Parameter(Mandatory)]
+        [string] $FailureMessage
     )
+
+    return $Alert
+}
+'@
+$alertRuleValidationContractSource += "`n$($alertRuleFunctions[0].Extent.Text)`n"
+$alertRuleValidationContractSource += @'
+Assert-ArcIdentityAlertRule `
+    -AlertName $AlertName `
+    -RequiredQueryFragments $RequiredQueryFragments `
+    -ExpectedActionGroupResourceId $actionGroupResourceId `
+    -ExpectedThreshold $ExpectedThreshold `
+    -ExpectedEvaluationFrequency $ExpectedEvaluationFrequency `
+    -ExpectedWindowSize 'PT5M' `
+    -ExpectedOverrideQueryTimeRange $ExpectedOverrideQueryTimeRange
+'@
+$alertRuleValidationContract = [scriptblock]::Create($alertRuleValidationContractSource)
+
+$alertProbeWorkspaceResourceId = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-alert-probe/providers/Microsoft.OperationalInsights/workspaces/law-alert-probe'
+$alertProbeActionGroupResourceId = '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-sre-alert-probe/providers/Microsoft.Insights/actionGroups/ag-alert-probe'
+function New-ArcIdentityLiveAlertResponse {
+    param(
+        [Parameter(Mandatory)]
+        [string] $EvaluationFrequency,
+        [Parameter(Mandatory)]
+        [int] $Threshold,
+        [Parameter(Mandatory)]
+        [string] $Query,
+        [hashtable] $OptionalProperties = @{}
+    )
+
+    $properties = [ordered]@{
+        actions = [ordered]@{
+            actionGroups = @($alertProbeActionGroupResourceId)
+        }
+        criteria = [ordered]@{
+            allOf = @(
+                [ordered]@{
+                    query = $Query
+                    timeAggregation = 'Count'
+                    operator = 'GreaterThanOrEqual'
+                    threshold = $Threshold
+                    failingPeriods = [ordered]@{
+                        numberOfEvaluationPeriods = 1
+                        minFailingPeriodsToAlert = 1
+                    }
+                }
+            )
+        }
+        enabled = $true
+        evaluationFrequency = $EvaluationFrequency
+        resolveConfiguration = [ordered]@{
+            autoResolved = $true
+            timeToResolve = 'PT10M'
+        }
+        scopes = @($alertProbeWorkspaceResourceId)
+        severity = 2
+        targetResourceTypes = @('Microsoft.OperationalInsights/workspaces')
+        windowSize = 'PT5M'
+    }
+    foreach ($propertyName in $OptionalProperties.Keys) {
+        $properties[$propertyName] = $OptionalProperties[$propertyName]
+    }
+    return (
+        [ordered]@{ properties = $properties } |
+            ConvertTo-Json -Depth 10 |
+            ConvertFrom-Json
+    )
+}
+
+$tokenAlertLiveQuery = @'
+let TargetResourceIds = dynamic(["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-alert-probe/providers/Microsoft.HybridCompute/machines/arcbox-win2k22"]);
+Event
+| where TimeGenerated >= ago(5m)
+| where set_has_element(TargetResourceIds, tolower(_ResourceId))
+| where EventLog == "Application"
+| where Source == "Mercadona.IdentityOps" and EventID == 4101
+| where RenderedDescription contains '"demoSynthetic":true'
+| project TimeGenerated, _ResourceId
+'@
+$freshnessAlertLiveQuery = @'
+let TargetResourceIds = dynamic(["/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-alert-probe/providers/Microsoft.HybridCompute/machines/arcbox-win2k22"]);
+let CurrentUtc = now();
+let CurrentMadrid = datetime_utc_to_local(CurrentUtc, "Europe/Madrid");
+let MadridMinuteOfDay = datetime_part("Hour", CurrentMadrid) * 60 + datetime_part("Minute", CurrentMadrid);
+let IsExpectedOperatingWindow = MadridMinuteOfDay >= 500 and datetime_part("Hour", CurrentUtc) < 18;
+union
+  (Heartbeat
+    | where TimeGenerated >= ago(20m)
+    | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="Heartbeat"),
+  (InsightsMetrics
+    | where TimeGenerated >= ago(20m)
+    | where Namespace == "Processor" and Name == "UtilizationPercentage"
+    | project TimeGenerated, ResourceId=tolower(_ResourceId), Signal="InsightsMetrics")
+| summarize LastSeen=max(TimeGenerated) by ResourceId, Signal
+| where IsExpectedOperatingWindow
+| where isnull(LastSeen) or LastSeen < ago(10m)
+| project ResourceId, Signal
+'@
+$tokenAlertLiveResponse = New-ArcIdentityLiveAlertResponse `
+    -EvaluationFrequency 'PT1M' `
+    -Threshold 8 `
+    -Query $tokenAlertLiveQuery
+$freshnessAlertLiveResponse = New-ArcIdentityLiveAlertResponse `
+    -EvaluationFrequency 'PT5M' `
+    -Threshold 1 `
+    -Query $freshnessAlertLiveQuery `
+    -OptionalProperties @{ overrideQueryTimeRange = 'PT30M' }
+
+$commonLiveAlertPropertyNames = @(
+    'actions',
+    'criteria',
+    'enabled',
+    'evaluationFrequency',
+    'resolveConfiguration',
+    'scopes',
+    'severity',
+    'targetResourceTypes',
+    'windowSize'
 )
-$alertOverrideProbeCases = @(
+$tokenLivePropertyNames = @($tokenAlertLiveResponse.properties.PSObject.Properties.Name | Sort-Object)
+$freshnessLivePropertyNames = @($freshnessAlertLiveResponse.properties.PSObject.Properties.Name | Sort-Object)
+Assert-True `
+    -Condition (
+        ($tokenLivePropertyNames -join '|') -ceq
+        (($commonLiveAlertPropertyNames | Sort-Object) -join '|')
+    ) `
+    -Case 'Token alert fixture matches exact live property shape'
+Assert-True `
+    -Condition (
+        ($freshnessLivePropertyNames -join '|') -ceq
+        ((@($commonLiveAlertPropertyNames) + 'overrideQueryTimeRange' | Sort-Object) -join '|')
+    ) `
+    -Case 'Freshness alert fixture matches exact live property shape'
+
+$missingFreshnessOverrideResponse = $freshnessAlertLiveResponse |
+    ConvertTo-Json -Depth 10 |
+    ConvertFrom-Json
+$missingFreshnessOverrideResponse.properties.PSObject.Properties.Remove('overrideQueryTimeRange')
+$wrongFreshnessOverrideResponse = $freshnessAlertLiveResponse |
+    ConvertTo-Json -Depth 10 |
+    ConvertFrom-Json
+$wrongFreshnessOverrideResponse.properties.overrideQueryTimeRange = 'PT20M'
+$alertRuleProbeCases = @(
     [pscustomobject]@{
         Name = 'absent token override'
-        Properties = '{}' | ConvertFrom-Json
+        AlertName = 'alert-token-probe'
+        Alert = $tokenAlertLiveResponse
+        RequiredQueryFragments = @(
+            'Mercadona.IdentityOps',
+            'demoSynthetic',
+            'EventID == 4101',
+            'project TimeGenerated, _ResourceId'
+        )
+        ExpectedThreshold = 8
+        ExpectedEvaluationFrequency = 'PT1M'
         ExpectedOverrideQueryTimeRange = $null
         ExpectedError = $null
     }
     [pscustomobject]@{
         Name = 'freshness PT30M override'
-        Properties = '{"overrideQueryTimeRange":"PT30M"}' | ConvertFrom-Json
+        AlertName = 'alert-freshness-probe'
+        Alert = $freshnessAlertLiveResponse
+        RequiredQueryFragments = @(
+            'Heartbeat',
+            'InsightsMetrics',
+            'UtilizationPercentage',
+            'ago(10m)',
+            'project ResourceId, Signal',
+            'datetime_utc_to_local(CurrentUtc, "Europe/Madrid")',
+            'MadridMinuteOfDay >= 500',
+            'datetime_part("Hour", CurrentUtc) < 18'
+        )
+        ExpectedThreshold = 1
+        ExpectedEvaluationFrequency = 'PT5M'
         ExpectedOverrideQueryTimeRange = 'PT30M'
         ExpectedError = $null
     }
     [pscustomobject]@{
         Name = 'missing freshness override'
-        Properties = '{}' | ConvertFrom-Json
+        AlertName = 'alert-freshness-missing-probe'
+        Alert = $missingFreshnessOverrideResponse
+        RequiredQueryFragments = @('Heartbeat')
+        ExpectedThreshold = 1
+        ExpectedEvaluationFrequency = 'PT5M'
         ExpectedOverrideQueryTimeRange = 'PT30M'
-        ExpectedError = "Alert 'alert-freshness-probe' does not preserve overrideQueryTimeRange 'PT30M'."
+        ExpectedError = "Alert 'alert-freshness-missing-probe' does not preserve overrideQueryTimeRange 'PT30M'."
     }
     [pscustomobject]@{
         Name = 'wrong freshness override'
-        Properties = '{"overrideQueryTimeRange":"PT20M"}' | ConvertFrom-Json
+        AlertName = 'alert-freshness-wrong-probe'
+        Alert = $wrongFreshnessOverrideResponse
+        RequiredQueryFragments = @('Heartbeat')
+        ExpectedThreshold = 1
+        ExpectedEvaluationFrequency = 'PT5M'
         ExpectedOverrideQueryTimeRange = 'PT30M'
-        ExpectedError = "Alert 'alert-freshness-probe' does not preserve overrideQueryTimeRange 'PT30M'."
+        ExpectedError = "Alert 'alert-freshness-wrong-probe' does not preserve overrideQueryTimeRange 'PT30M'."
     }
 )
-$alertOverrideProbeErrors = @{}
-foreach ($alertOverrideProbeCase in $alertOverrideProbeCases) {
-    $alertOverrideProbeError = $null
+$alertRuleProbeErrors = @{}
+foreach ($alertRuleProbeCase in $alertRuleProbeCases) {
+    $alertRuleProbeError = $null
     try {
-        $null = & $alertOverrideValidationContract `
-            -properties $alertOverrideProbeCase.Properties `
-            -ExpectedOverrideQueryTimeRange $alertOverrideProbeCase.ExpectedOverrideQueryTimeRange
+        $null = & $alertRuleValidationContract `
+            -Alert $alertRuleProbeCase.Alert `
+            -AlertName $alertRuleProbeCase.AlertName `
+            -RequiredQueryFragments $alertRuleProbeCase.RequiredQueryFragments `
+            -ExpectedThreshold $alertRuleProbeCase.ExpectedThreshold `
+            -ExpectedEvaluationFrequency $alertRuleProbeCase.ExpectedEvaluationFrequency `
+            -ExpectedOverrideQueryTimeRange $alertRuleProbeCase.ExpectedOverrideQueryTimeRange
     } catch {
-        $alertOverrideProbeError = $_.Exception.Message
+        $alertRuleProbeError = $_.Exception.Message
     }
-    $alertOverrideProbeErrors[$alertOverrideProbeCase.Name] = $alertOverrideProbeError
+    $alertRuleProbeErrors[$alertRuleProbeCase.Name] = $alertRuleProbeError
     Assert-True `
-        -Condition ($alertOverrideProbeError -ceq $alertOverrideProbeCase.ExpectedError) `
-        -Case "Verifier production alert contract: $($alertOverrideProbeCase.Name)"
+        -Condition ($alertRuleProbeError -ceq $alertRuleProbeCase.ExpectedError) `
+        -Case "Verifier production alert contract: $($alertRuleProbeCase.Name)"
 }
 Assert-NotMatches `
-    -Source ([string] $alertOverrideProbeErrors['missing freshness override']) `
+    -Source ([string] $alertRuleProbeErrors['missing freshness override']) `
     -Pattern "The property 'overrideQueryTimeRange' cannot be found" `
     -Case 'Missing freshness override returns a contract error instead of a StrictMode property exception'
 
