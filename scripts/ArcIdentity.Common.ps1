@@ -1184,9 +1184,9 @@ function Invoke-ArcIdentityRunCommand {
                 ) `
                 -FailureMessage "Unable to read Run Command '$RunCommandName' on '$MachineName'."
             $properties = Get-ArcIdentityOptionalPropertyValue -InputObject $command -PropertyName 'properties'
-            $source = Get-ArcIdentityOptionalPropertyValue `
-                -InputObject $properties `
-                -PropertyName 'source'
+            $source = Get-ArcIdentityFirstPropertyValue `
+                -InputObjects @($command, $properties) `
+                -PropertyNames @('source')
             $persistedScript = Get-ArcIdentityOptionalPropertyValue `
                 -InputObject $source `
                 -PropertyName 'script'

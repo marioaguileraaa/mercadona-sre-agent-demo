@@ -456,7 +456,15 @@ function Invoke-ArcIdentityArmRestBodyProbe {
 function Invoke-ArcIdentityRunCommandProbe {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Success', 'TruncatedScript', 'CreateFailure')]
+        [ValidateSet(
+            'SuccessFlattened',
+            'SuccessNested',
+            'MissingSource',
+            'MissingScript',
+            'TruncatedScript',
+            'DifferentScript',
+            'CreateFailure'
+        )]
         [string] $Mode
     )
 
@@ -577,17 +585,39 @@ Write-Output $message
                     Kind = 'RunCommandShow'
                     Arguments = [string[]] $azArguments.Clone()
                 })
-            $persistedScript = if ($Mode -ceq 'TruncatedScript') {
-                $scriptText.Split("`n")[0].TrimEnd("`r")
-            } else {
-                $scriptText
+            $persistedScript = switch ($Mode) {
+                'TruncatedScript' {
+                    $scriptText.Split("`n")[0].TrimEnd("`r")
+                    break
+                }
+                'DifferentScript' {
+                    "$scriptText`nWrite-Output 'Unexpected content'"
+                    break
+                }
+                default {
+                    $scriptText
+                }
             }
-            return ConvertTo-FakeAzJson -InputObject ([ordered]@{
+            $source = if ($Mode -ceq 'MissingSource') {
+                $null
+            } elseif ($Mode -ceq 'MissingScript') {
+                [ordered]@{}
+            } else {
+                [ordered]@{
+                    script = $persistedScript
+                }
+            }
+            $response = [ordered]@{
+                name = $runCommandName
+                provisioningState = 'Succeeded'
+                instanceViewExecutionState = 'Succeeded'
+                instanceViewExitCode = 0
+            }
+            if ($Mode -ceq 'SuccessNested') {
+                $response = [ordered]@{
                     name = $runCommandName
                     properties = [ordered]@{
-                        source = [ordered]@{
-                            script = $persistedScript
-                        }
+                        source = $source
                         provisioningState = 'Succeeded'
                         instanceView = [ordered]@{
                             executionState = 'Succeeded'
@@ -596,7 +626,11 @@ Write-Output $message
                             error = ''
                         }
                     }
-                })
+                }
+            } elseif ($Mode -cne 'MissingSource') {
+                $response['source'] = $source
+            }
+            return ConvertTo-FakeAzJson -InputObject $response
         }
         if ($azArguments[0] -ceq 'connectedmachine' -and
             $azArguments[1] -ceq 'run-command' -and
@@ -1904,7 +1938,7 @@ Assert-True `
     ) `
     -Case 'Failed ARM call receives the expected body file'
 
-$runCommandSuccessProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'Success'
+$runCommandSuccessProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'SuccessFlattened'
 $runCommandSuccessRestCall = $runCommandSuccessProbe.RestCall
 Assert-True -Condition ($null -eq $runCommandSuccessProbe.ErrorMessage) -Case 'Run Command ARM success'
 Assert-True -Condition ($null -ne $runCommandSuccessProbe.Result) -Case 'Run Command result is preserved'
@@ -1971,6 +2005,20 @@ Assert-True `
     ) `
     -Case 'Run Command production path never sends inline --script'
 
+$runCommandNestedSuccessProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'SuccessNested'
+Assert-True `
+    -Condition (
+        $null -eq $runCommandNestedSuccessProbe.ErrorMessage -and
+        $null -ne $runCommandNestedSuccessProbe.Result
+    ) `
+    -Case 'Run Command accepts exact script from nested ARM response shape'
+Assert-True `
+    -Condition (
+        @($runCommandNestedSuccessProbe.Calls | Where-Object { $_.Kind -ceq 'Delete' }).Count -eq 1 -and
+        -not $runCommandNestedSuccessProbe.ResourceExists
+    ) `
+    -Case 'Nested ARM response Run Command resource cleanup after success'
+
 $runCommandTruncatedProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'TruncatedScript'
 Assert-True `
     -Condition (
@@ -1987,6 +2035,30 @@ Assert-True `
 Assert-True `
     -Condition (-not (Test-Path -LiteralPath $runCommandTruncatedProbe.RestCall.BodyPath)) `
     -Case 'Run Command body file cleanup after script mismatch'
+
+$runCommandMissingSourceProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'MissingSource'
+Assert-True `
+    -Condition (
+        $runCommandMissingSourceProbe.ErrorMessage -ceq
+        "Run Command '$($runCommandMissingSourceProbe.RunCommandName)' on 'ArcBox-Win2K22' did not preserve the exact requested script."
+    ) `
+    -Case 'Succeeded zero-exit Run Command rejects absent source'
+
+$runCommandMissingScriptProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'MissingScript'
+Assert-True `
+    -Condition (
+        $runCommandMissingScriptProbe.ErrorMessage -ceq
+        "Run Command '$($runCommandMissingScriptProbe.RunCommandName)' on 'ArcBox-Win2K22' did not preserve the exact requested script."
+    ) `
+    -Case 'Succeeded zero-exit Run Command rejects absent source script'
+
+$runCommandDifferentScriptProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'DifferentScript'
+Assert-True `
+    -Condition (
+        $runCommandDifferentScriptProbe.ErrorMessage -ceq
+        "Run Command '$($runCommandDifferentScriptProbe.RunCommandName)' on 'ArcBox-Win2K22' did not preserve the exact requested script."
+    ) `
+    -Case 'Succeeded zero-exit Run Command rejects different script'
 
 $runCommandCreateFailureProbe = Invoke-ArcIdentityRunCommandProbe -Mode 'CreateFailure'
 Assert-True `
