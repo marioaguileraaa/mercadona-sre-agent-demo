@@ -32,6 +32,54 @@ $monitoringReaderRoleId = '43d0d8ad-25c7-4714-9337-8ba259a9fe05'
 $logAnalyticsReaderRoleId = '73c42c96-874c-492b-b04d-ab87d138a893'
 $previewApiVersion = '2025-05-01-preview'
 
+function Test-ArcIdentityScheduledTaskEnabled {
+    param(
+        [AllowNull()]
+        [object] $ScheduledTaskProperties,
+        [AllowNull()]
+        [object] $ScheduledTask
+    )
+
+    $enabledValues = [System.Collections.Generic.List[object]]::new()
+    $statusValues = [System.Collections.Generic.List[object]]::new()
+    foreach ($inputObject in @($ScheduledTaskProperties, $ScheduledTask)) {
+        if ($null -eq $inputObject) {
+            continue
+        }
+        $enabledProperty = $inputObject.PSObject.Properties['isEnabled']
+        if ($null -ne $enabledProperty) {
+            $enabledValues.Add($enabledProperty.Value)
+        }
+        $statusProperty = $inputObject.PSObject.Properties['status']
+        if ($null -ne $statusProperty) {
+            $statusValues.Add($statusProperty.Value)
+        }
+    }
+
+    if ($enabledValues.Count -gt 0) {
+        foreach ($enabledValue in $enabledValues) {
+            if ($enabledValue -isnot [bool] -or $enabledValue -ne $true) {
+                return $false
+            }
+        }
+        foreach ($statusValue in $statusValues) {
+            if ($statusValue -isnot [string] -or $statusValue -cne 'Active') {
+                return $false
+            }
+        }
+        return $true
+    }
+    if ($statusValues.Count -eq 0) {
+        return $false
+    }
+    foreach ($statusValue in $statusValues) {
+        if ($statusValue -isnot [string] -or $statusValue -cne 'Active') {
+            return $false
+        }
+    }
+    return $true
+}
+
 Assert-ArcIdentityAzureContext `
     -SubscriptionId $SubscriptionId `
     -TenantId $TenantId `
@@ -536,12 +584,12 @@ try {
     $scheduledTaskCron = Get-ArcIdentityFirstPropertyValue `
         -InputObjects @($scheduledTaskProperties, $scheduledTask) `
         -PropertyNames @('cronExpression')
-    $scheduledTaskEnabled = Get-ArcIdentityFirstPropertyValue `
-        -InputObjects @($scheduledTaskProperties, $scheduledTask) `
-        -PropertyNames @('isEnabled')
+    $scheduledTaskEnabledStateIsValid = Test-ArcIdentityScheduledTaskEnabled `
+        -ScheduledTaskProperties $scheduledTaskProperties `
+        -ScheduledTask $scheduledTask
     if ($scheduledTaskMode -ne 'Review' -or
         $scheduledTaskCron -ne '30 7 * * 1-5' -or
-        $scheduledTaskEnabled -ne $true) {
+        -not $scheduledTaskEnabledStateIsValid) {
         throw 'The identity operational report must remain enabled, weekday-only, and Review mode.'
     }
 } finally {

@@ -2179,6 +2179,111 @@ foreach ($invalidWindowsEventLogCase in $invalidWindowsEventLogCases) {
         -Condition ($windowsEventDcrError -ceq 'The dedicated DCR must contain exactly one Windows event source and no duplicate performance-counter source.') `
         -Case "Verifier rejects $($invalidWindowsEventLogCase.Name) windowsEventLogs entries"
 }
+$scheduledTaskEnabledFunctions = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Test-ArcIdentityScheduledTaskEnabled'
+    }, $true)
+)
+$scheduledTaskPropertyAssignments = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -ceq '$scheduledTaskProperties'
+    }, $true)
+)
+$scheduledTaskContractChecks = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains('$scheduledTaskMode -ne ''Review''', [StringComparison]::Ordinal) -and
+        $node.Extent.Text.Contains('$scheduledTaskCron -ne ''30 7 * * 1-5''', [StringComparison]::Ordinal) -and
+        $node.Extent.Text.Contains('-not $scheduledTaskEnabledStateIsValid', [StringComparison]::Ordinal)
+    }, $true)
+)
+Assert-True `
+    -Condition (
+        $scheduledTaskEnabledFunctions.Count -eq 1 -and
+        $scheduledTaskPropertyAssignments.Count -eq 1 -and
+        $scheduledTaskContractChecks.Count -eq 1
+    ) `
+    -Case 'Verifier has one normalized scheduled task contract'
+$scheduledTaskValidationContract = [scriptblock]::Create(
+    "param([AllowNull()][object] `$scheduledTask)`n" +
+    $scheduledTaskEnabledFunctions[0].Extent.Text +
+    "`n" +
+    $verifySource.Substring(
+        $scheduledTaskPropertyAssignments[0].Extent.StartOffset,
+        $scheduledTaskContractChecks[0].Extent.EndOffset -
+        $scheduledTaskPropertyAssignments[0].Extent.StartOffset
+    )
+)
+
+function New-ArcIdentityScheduledTaskProbeResponse {
+    param(
+        [hashtable] $Properties = @{},
+        [hashtable] $TopLevel = @{}
+    )
+
+    $taskProperties = [ordered]@{
+        agentMode = 'Review'
+        cronExpression = '30 7 * * 1-5'
+    }
+    foreach ($key in $Properties.Keys) {
+        $taskProperties[$key] = $Properties[$key]
+    }
+    $response = [ordered]@{
+        properties = [pscustomobject] $taskProperties
+    }
+    foreach ($key in $TopLevel.Keys) {
+        $response[$key] = $TopLevel[$key]
+    }
+    return [pscustomobject] $response
+}
+
+$scheduledTaskStateCases = @(
+    [pscustomobject]@{ Name = 'live Active status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active' }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'top-level Active status'; Task = New-ArcIdentityScheduledTaskProbeResponse -TopLevel @{ status = 'Active' }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'explicit true'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'aligned true and Active'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true; status = 'Active' }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'aligned nested and top-level state'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true; status = 'Active' } -TopLevel @{ isEnabled = $true; status = 'Active' }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'explicit false'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $false }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'false conflicting with Active'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $false; status = 'Active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'true conflicting with Inactive'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true; status = 'Inactive' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'nested true conflicting with top-level false'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true; status = 'Active' } -TopLevel @{ isEnabled = $false; status = 'Active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'nested Active conflicting with top-level Disabled'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active' } -TopLevel @{ status = 'Disabled' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'nested Active conflicting with wrong-case top-level status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active' } -TopLevel @{ status = 'active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'Inactive status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Inactive' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'Disabled status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Disabled' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'wrong-case active status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'explicit null'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $null; status = 'Active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'non-boolean explicit value'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = 'true'; status = 'Active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'explicit null status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = $null }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'missing enabled state'; Task = New-ArcIdentityScheduledTaskProbeResponse; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'wrong cron'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active'; cronExpression = '0 7 * * 1-5' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'non-Review mode'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active'; agentMode = 'Autonomous' }; ExpectedValid = $false }
+)
+foreach ($scheduledTaskStateCase in $scheduledTaskStateCases) {
+    $scheduledTaskValidationError = $null
+    try {
+        $null = & $scheduledTaskValidationContract $scheduledTaskStateCase.Task
+    } catch {
+        $scheduledTaskValidationError = $_.Exception.Message
+    }
+    if ($scheduledTaskStateCase.ExpectedValid) {
+        Assert-True `
+            -Condition ($null -eq $scheduledTaskValidationError) `
+            -Case "Verifier accepts scheduled task: $($scheduledTaskStateCase.Name)"
+    } else {
+        Assert-True `
+            -Condition (
+                $scheduledTaskValidationError -ceq
+                'The identity operational report must remain enabled, weekday-only, and Review mode.'
+            ) `
+            -Case "Verifier rejects scheduled task: $($scheduledTaskStateCase.Name)"
+    }
+}
 Assert-Contains -Source $verifySource -Expected '$autoMitigate = Get-ArcIdentityOptionalPropertyValue' -Case 'Verification tolerates absent autoMitigate'
 Assert-Contains -Source $verifySource -Expected '$null -ne $autoMitigate -and $autoMitigate -ne $true' -Case 'Verification rejects conflicting autoMitigate'
 Assert-NotMatches -Source $verifySource -Pattern '\$properties\.autoMitigate' -Case 'Verification does not require autoMitigate response'
