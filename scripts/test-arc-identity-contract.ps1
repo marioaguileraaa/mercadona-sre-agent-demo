@@ -2082,6 +2082,95 @@ $verifyContractAst = [System.Management.Automation.Language.Parser]::ParseInput(
 Assert-True `
     -Condition ($verifyContractErrors.Count -eq 0) `
     -Case 'Verifier parses for DCR source cardinality probe'
+$verifyXPathFragmentLoops = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+        $node.Extent.Text.Contains(
+            'The dedicated DCR is missing XPath contract',
+            [StringComparison]::Ordinal
+        )
+    }, $true)
+)
+$verifyXPathSecurityChecks = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains(
+            'The synthetic identity DCR must not collect the broad Windows Security log.',
+            [StringComparison]::Ordinal
+        )
+    }, $true)
+)
+Assert-True `
+    -Condition ($verifyXPathFragmentLoops.Count -eq 1 -and $verifyXPathSecurityChecks.Count -eq 1) `
+    -Case 'Verifier has one XPath fragment and Security rejection block'
+$verifyXPathContractStart = $verifyXPathFragmentLoops[0].Extent.StartOffset
+$verifyXPathContractEnd = $verifyXPathSecurityChecks[0].Extent.EndOffset
+Assert-True `
+    -Condition ($verifyXPathContractStart -lt $verifyXPathContractEnd) `
+    -Case 'Verifier XPath checks preserve fragment-before-Security order'
+$verifyXPathContract = [scriptblock]::Create(
+    "param([string[]] `$xPathQueries)`n" +
+    $verifySource.Substring(
+        $verifyXPathContractStart,
+        $verifyXPathContractEnd - $verifyXPathContractStart
+    )
+)
+$liveXPathQueries = @(
+    "Application!*[System[Provider[@Name='Mercadona.IdentityOps'] and (EventID=4101 or EventID=4102)]]"
+    'System!*[System[(Level=1 or Level=2 or Level=3)]]'
+    "Application!*[System[(Level=1 or Level=2 or Level=3) and Provider[@Name!='Mercadona.IdentityOps']]]"
+)
+$requiredXPathFragments = @(
+    "Provider[@Name='Mercadona.IdentityOps']"
+    'EventID=4101'
+    'EventID=4102'
+    'System!*[System[(Level=1 or Level=2 or Level=3)]]'
+    "Provider[@Name!='Mercadona.IdentityOps']"
+)
+$liveXPathError = $null
+try {
+    & $verifyXPathContract -xPathQueries $liveXPathQueries
+} catch {
+    $liveXPathError = $_.Exception.Message
+}
+Assert-True `
+    -Condition ($null -eq $liveXPathError) `
+    -Case 'Verifier accepts exact live XPath queries with brackets and inequality'
+foreach ($missingXPathFragment in $requiredXPathFragments) {
+    $missingXPathQueries = @(
+        $liveXPathQueries | ForEach-Object {
+            ([string] $_).Replace($missingXPathFragment, '<missing>')
+        }
+    )
+    $missingXPathError = $null
+    try {
+        & $verifyXPathContract -xPathQueries $missingXPathQueries
+    } catch {
+        $missingXPathError = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition (
+            $missingXPathError -ceq
+            "The dedicated DCR is missing XPath contract '$missingXPathFragment'."
+        ) `
+        -Case "Verifier rejects missing XPath fragment '$missingXPathFragment'"
+}
+$securityXPathError = $null
+try {
+    & $verifyXPathContract -xPathQueries (
+        @($liveXPathQueries) + 'Security!*[System[(Level=1 or Level=2 or Level=3)]]'
+    )
+} catch {
+    $securityXPathError = $_.Exception.Message
+}
+Assert-True `
+    -Condition (
+        $securityXPathError -ceq
+        'The synthetic identity DCR must not collect the broad Windows Security log.'
+    ) `
+    -Case 'Verifier preserves broad Security log rejection'
 $countValidatedOptionalArrayNames = @(
     '$windowsEventLogs',
     '$performanceCounters',
