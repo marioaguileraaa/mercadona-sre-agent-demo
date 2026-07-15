@@ -1790,6 +1790,113 @@ $verifySource = $scriptSources['verify-arc-identity.ps1']
 Assert-Contains -Source $verifySource -Expected '$freshnessLookbackMinutes = $MaximumIngestionAgeMinutes + 5' -Case 'Verification lookback follows accepted freshness threshold'
 Assert-Contains -Source $verifySource -Expected 'MSVMI-ama-vmi-default-dcr' -Case 'Verification preserves existing VM Insights DCR'
 Assert-Contains -Source $verifySource -Expected 'no duplicate performance-counter source' -Case 'Verification rejects duplicate counters'
+$verifyContractTokens = $null
+$verifyContractErrors = $null
+$verifyContractAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $verifySource,
+    [ref] $verifyContractTokens,
+    [ref] $verifyContractErrors
+)
+Assert-True `
+    -Condition ($verifyContractErrors.Count -eq 0) `
+    -Case 'Verifier parses for DCR source cardinality probe'
+$countValidatedOptionalArrayNames = @(
+    '$windowsEventLogs',
+    '$performanceCounters',
+    '$dcrDataFlows',
+    '$eventStreams',
+    '$logAnalyticsDestinations'
+)
+$countValidatedOptionalArrayAssignments = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -in $countValidatedOptionalArrayNames
+    }, $true)
+)
+Assert-True `
+    -Condition ($countValidatedOptionalArrayAssignments.Count -eq $countValidatedOptionalArrayNames.Count) `
+    -Case 'Verifier has all count-validated optional array assignments'
+foreach ($assignment in $countValidatedOptionalArrayAssignments) {
+    Assert-Contains `
+        -Source $assignment.Right.Extent.Text `
+        -Expected 'Where-Object { $null -ne $_ }' `
+        -Case "Verifier excludes nulls from $($assignment.Left.Extent.Text)"
+}
+$verifySourceAssignments = @(
+    $countValidatedOptionalArrayAssignments |
+        Where-Object { $_.Left.Extent.Text -in @('$windowsEventLogs', '$performanceCounters') }
+)
+$verifySourceCardinalityChecks = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains('$windowsEventLogs.Count -ne 1', [StringComparison]::Ordinal) -and
+        $node.Extent.Text.Contains('$performanceCounters.Count -ne 0', [StringComparison]::Ordinal)
+    }, $true)
+)
+Assert-True `
+    -Condition ($verifySourceAssignments.Count -eq 2 -and $verifySourceCardinalityChecks.Count -eq 1) `
+    -Case 'Verifier has one DCR source cardinality contract'
+$verifySourceContractStart = ($verifySourceAssignments | Sort-Object {
+        $_.Extent.StartOffset
+    } | Select-Object -First 1).Extent.StartOffset
+$verifySourceContractEnd = $verifySourceCardinalityChecks[0].Extent.EndOffset
+$verifySourceContract = [scriptblock]::Create(
+    "param([AllowNull()][object] `$dcrDataSources)`n" +
+    $verifySource.Substring(
+        $verifySourceContractStart,
+        $verifySourceContractEnd - $verifySourceContractStart
+    )
+)
+$windowsEventSource = [pscustomobject]@{ name = 'SyntheticWindowsEvents' }
+$validDcrDataSources = [pscustomobject]@{
+    windowsEventLogs = @($windowsEventSource)
+}
+$validDcrError = $null
+try {
+    & $verifySourceContract $validDcrDataSources
+} catch {
+    $validDcrError = $_.Exception.Message
+}
+Assert-True `
+    -Condition ($null -eq $validDcrError) `
+    -Case 'Verifier accepts an absent performanceCounters property'
+$performanceDcrError = $null
+try {
+    & $verifySourceContract ([pscustomobject]@{
+            windowsEventLogs = @($windowsEventSource)
+            performanceCounters = @([pscustomobject]@{ name = 'SyntheticPerformance' })
+        })
+} catch {
+    $performanceDcrError = $_.Exception.Message
+}
+Assert-True `
+    -Condition ($performanceDcrError -ceq 'The dedicated DCR must contain exactly one Windows event source and no duplicate performance-counter source.') `
+    -Case 'Verifier rejects an actual performanceCounters entry'
+$invalidWindowsEventLogCases = @(
+    [pscustomobject]@{
+        Name = 'missing'
+        Values = @()
+    }
+    [pscustomobject]@{
+        Name = 'multiple'
+        Values = @($windowsEventSource, $windowsEventSource)
+    }
+)
+foreach ($invalidWindowsEventLogCase in $invalidWindowsEventLogCases) {
+    $windowsEventDcrError = $null
+    try {
+        & $verifySourceContract ([pscustomobject]@{
+                windowsEventLogs = $invalidWindowsEventLogCase.Values
+            })
+    } catch {
+        $windowsEventDcrError = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition ($windowsEventDcrError -ceq 'The dedicated DCR must contain exactly one Windows event source and no duplicate performance-counter source.') `
+        -Case "Verifier rejects $($invalidWindowsEventLogCase.Name) windowsEventLogs entries"
+}
 Assert-Contains -Source $verifySource -Expected '$autoMitigate = Get-ArcIdentityOptionalPropertyValue' -Case 'Verification tolerates absent autoMitigate'
 Assert-Contains -Source $verifySource -Expected '$null -ne $autoMitigate -and $autoMitigate -ne $true' -Case 'Verification rejects conflicting autoMitigate'
 Assert-NotMatches -Source $verifySource -Pattern '\$properties\.autoMitigate' -Case 'Verification does not require autoMitigate response'

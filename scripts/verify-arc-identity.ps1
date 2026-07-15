@@ -79,10 +79,12 @@ if ($null -eq $dcrProperties) {
 }
 $dcrDataSources = Get-ArcIdentityOptionalPropertyValue -InputObject $dcrProperties -PropertyName 'dataSources'
 $windowsEventLogs = @(
-    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrDataSources -PropertyName 'windowsEventLogs'
+    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrDataSources -PropertyName 'windowsEventLogs' |
+        Where-Object { $null -ne $_ }
 )
 $performanceCounters = @(
-    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrDataSources -PropertyName 'performanceCounters'
+    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrDataSources -PropertyName 'performanceCounters' |
+        Where-Object { $null -ne $_ }
 )
 if ($windowsEventLogs.Count -ne 1 -or $performanceCounters.Count -ne 0) {
     throw 'The dedicated DCR must contain exactly one Windows event source and no duplicate performance-counter source.'
@@ -104,10 +106,12 @@ if ($xPathQueries | Where-Object { $_ -match '^(?i)Security!' }) {
 }
 
 $dcrDataFlows = @(
-    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrProperties -PropertyName 'dataFlows'
+    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrProperties -PropertyName 'dataFlows' |
+        Where-Object { $null -ne $_ }
 )
 $eventStreams = @(
-    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrDataFlows[0] -PropertyName 'streams'
+    Get-ArcIdentityOptionalPropertyValue -InputObject $dcrDataFlows[0] -PropertyName 'streams' |
+        Where-Object { $null -ne $_ }
 )
 if ($dcrDataFlows.Count -ne 1 -or
     $eventStreams.Count -ne 1 -or
@@ -117,7 +121,8 @@ if ($dcrDataFlows.Count -ne 1 -or
 
 $destinations = Get-ArcIdentityOptionalPropertyValue -InputObject $dcrProperties -PropertyName 'destinations'
 $logAnalyticsDestinations = @(
-    Get-ArcIdentityOptionalPropertyValue -InputObject $destinations -PropertyName 'logAnalytics'
+    Get-ArcIdentityOptionalPropertyValue -InputObject $destinations -PropertyName 'logAnalytics' |
+        Where-Object { $null -ne $_ }
 )
 if ($logAnalyticsDestinations.Count -ne 1 -or
     -not [string]::Equals(
