@@ -16,6 +16,21 @@ $ErrorActionPreference = 'Stop'
 
 . "$PSScriptRoot\ArcIdentity.Common.ps1"
 
+$repoRoot = Split-Path -Path $PSScriptRoot -Parent
+$skillAdditionalFilePaths = @(
+    'kql/arc-identity/fleet-heartbeat.kql',
+    'kql/arc-identity/data-freshness.kql',
+    'kql/arc-identity/synthetic-token-failure-burst.kql',
+    'kql/arc-identity/performance-correlation.kql',
+    'kql/arc-identity/extension-health.arg.kql',
+    'kql/arc-identity/change-tracking.kql'
+)
+$skillAdditionalFiles = @(
+    Get-ArcIdentitySkillAdditionalFiles `
+        -RepositoryRoot $repoRoot `
+        -RelativePaths $skillAdditionalFilePaths
+)
+
 function Assert-ArcIdentityOwnedSreResource {
     param(
         [AllowNull()]
@@ -205,32 +220,12 @@ $existingConnector = @(Get-ArcIdentityResponseItems -Response $connectorList) |
     } |
     Select-Object -First 1
 if ($null -ne $existingConnector) {
-    $existingConnectorProperties = Get-ArcIdentityOptionalPropertyValue `
-        -InputObject $existingConnector `
-        -PropertyName 'properties'
-    if ((Get-ArcIdentityOptionalPropertyValue `
-                -InputObject $existingConnectorProperties `
-                -PropertyName 'dataConnectorType') -ne 'LogAnalytics' -or
-        -not [string]::Equals(
-            [string] (
-                Get-ArcIdentityOptionalPropertyValue `
-                    -InputObject $existingConnectorProperties `
-                    -PropertyName 'dataSource'
-            ),
-            $workspaceResourceId,
-            [StringComparison]::OrdinalIgnoreCase
-        ) -or
-        -not [string]::Equals(
-            [string] (
-                Get-ArcIdentityOptionalPropertyValue `
-                    -InputObject $existingConnectorProperties `
-                    -PropertyName 'identity'
-            ),
-            $sreIdentityResourceId,
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
-        throw "Connector '$connectorName' already exists with a different type, workspace, or identity; refusing to overwrite it."
-    }
+    Assert-ArcIdentityLogAnalyticsConnector `
+        -Connector $existingConnector `
+        -ExpectedName $connectorName `
+        -ExpectedWorkspaceResourceId $workspaceResourceId `
+        -ExpectedWorkspaceName $WorkspaceName `
+        -ExpectedIdentity $sreIdentityResourceId
 }
 
 $sreExtensionResources = @(
@@ -363,6 +358,20 @@ if ($null -eq $existingConnector) {
     Assert-ArcIdentitySreAgentSafety `
         -Agent $agentAfterConnectorPut `
         -ExpectedIdentity $sreIdentityResourceId
+    $createdConnector = Invoke-ArcIdentityAzJson `
+        -Arguments @(
+            'rest',
+            '--method', 'get',
+            '--url', "https://management.azure.com${agentResourceId}/connectors/${connectorName}?api-version=$previewApiVersion",
+            '--output', 'json'
+        ) `
+        -FailureMessage "Unable to verify connector '$connectorName' after creation."
+    Assert-ArcIdentityLogAnalyticsConnector `
+        -Connector $createdConnector `
+        -ExpectedName $connectorName `
+        -ExpectedWorkspaceResourceId $workspaceResourceId `
+        -ExpectedWorkspaceName $WorkspaceName `
+        -ExpectedIdentity $sreIdentityResourceId
     $agent = $agentAfterConnectorPut
 } else {
     Write-Host "Reusing existing exact-scope connector '$connectorName'."
@@ -393,14 +402,7 @@ Use the aggregate-only queries under kql/arc-identity: fleet-heartbeat.kql, data
 
 Do not perform autonomous identity or security remediation. Keep every recommendation under human review. If evidence indicates a true security incident rather than demoSynthetic=true telemetry, stop the demo workflow and hand off to the SOC and Microsoft Sentinel.
 '@
-        additionalFiles = @(
-            'kql/arc-identity/fleet-heartbeat.kql',
-            'kql/arc-identity/data-freshness.kql',
-            'kql/arc-identity/synthetic-token-failure-burst.kql',
-            'kql/arc-identity/performance-correlation.kql',
-            'kql/arc-identity/extension-health.arg.kql',
-            'kql/arc-identity/change-tracking.kql'
-        )
+        additionalFiles = $skillAdditionalFiles
     }
 }
 

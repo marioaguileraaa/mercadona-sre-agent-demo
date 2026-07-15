@@ -44,6 +44,220 @@ function Get-ArcIdentityFirstPropertyValue {
     return $null
 }
 
+function Get-ArcIdentitySkillAdditionalFiles {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $RepositoryRoot,
+        [Parameter(Mandatory)]
+        [ValidateCount(1, 100)]
+        [string[]] $RelativePaths
+    )
+
+    try {
+        $resolvedRepositoryRoot = [System.IO.Path]::GetFullPath($RepositoryRoot)
+    } catch {
+        throw "Unable to resolve repository root '$RepositoryRoot': $($_.Exception.Message)"
+    }
+    if (-not (Test-Path -LiteralPath $resolvedRepositoryRoot -PathType Container)) {
+        throw "Repository root '$resolvedRepositoryRoot' does not exist."
+    }
+
+    $pathComparison = if ([System.IO.Path]::DirectorySeparatorChar -eq '\') {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
+    $directorySeparators = [char[]] @(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $repositoryRootPrefix = $resolvedRepositoryRoot.TrimEnd($directorySeparators) +
+        [System.IO.Path]::DirectorySeparatorChar
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+
+    foreach ($relativePath in $RelativePaths) {
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or
+            [System.IO.Path]::IsPathFullyQualified($relativePath)) {
+            throw "Required SRE Agent skill file path '$relativePath' must be a nonblank repository-relative path."
+        }
+
+        try {
+            $fileSystemRelativePath = $relativePath.Replace(
+                [char] '/',
+                [System.IO.Path]::DirectorySeparatorChar
+            )
+            $resolvedFilePath = [System.IO.Path]::GetFullPath(
+                [System.IO.Path]::Combine($resolvedRepositoryRoot, $fileSystemRelativePath)
+            )
+        } catch {
+            throw "Unable to resolve required SRE Agent skill file '$relativePath': $($_.Exception.Message)"
+        }
+        if (-not $resolvedFilePath.StartsWith($repositoryRootPrefix, $pathComparison)) {
+            throw "Required SRE Agent skill file '$relativePath' resolves outside the repository root."
+        }
+        if (-not (Test-Path -LiteralPath $resolvedFilePath -PathType Leaf)) {
+            throw "Required SRE Agent skill file '$relativePath' does not exist."
+        }
+
+        try {
+            $content = $strictUtf8.GetString(
+                [System.IO.File]::ReadAllBytes($resolvedFilePath)
+            )
+        } catch {
+            throw "Unable to read required SRE Agent skill file '$relativePath' as UTF-8 text: $($_.Exception.Message)"
+        }
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            throw "Required SRE Agent skill file '$relativePath' is empty."
+        }
+
+        [ordered]@{
+            filePath = $relativePath
+            content = $content
+        }
+    }
+}
+
+function Assert-ArcIdentityLogAnalyticsConnector {
+    param(
+        [Parameter(Mandatory)]
+        [object] $Connector,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ExpectedName,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ExpectedWorkspaceResourceId,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ExpectedWorkspaceName,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ExpectedIdentity
+    )
+
+    $properties = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $Connector `
+        -PropertyName 'properties'
+    $extendedProperties = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'extendedProperties'
+    $resource = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $extendedProperties `
+        -PropertyName 'resource'
+    $mismatches = [System.Collections.Generic.List[string]]::new()
+
+    $actualName = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $Connector `
+        -PropertyName 'name'
+    $actualLeafName = if ($actualName -is [string]) {
+        (([string] $actualName).TrimEnd('/') -split '/')[-1]
+    } else {
+        ''
+    }
+    if ([string]::IsNullOrWhiteSpace($actualLeafName) -or
+        -not [string]::Equals(
+            $actualLeafName,
+            $ExpectedName,
+            [StringComparison]::Ordinal
+        )) {
+        $mismatches.Add('name')
+    }
+
+    $dataConnectorType = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'dataConnectorType'
+    if ($dataConnectorType -isnot [string] -or
+        [string] $dataConnectorType -cne 'LogAnalytics') {
+        $mismatches.Add('dataConnectorType')
+    }
+
+    $identity = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'identity'
+    if ($identity -isnot [string] -or
+        [string]::IsNullOrWhiteSpace([string] $identity) -or
+        -not [string]::Equals(
+            [string] $identity,
+            $ExpectedIdentity,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        $mismatches.Add('identity')
+    }
+
+    $source = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'source'
+    if ($null -ne $source -and
+        ($source -isnot [string] -or [string] $source -cne 'Agent')) {
+        $mismatches.Add('source')
+    }
+
+    $provisioningState = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'provisioningState'
+    if ($null -ne $provisioningState -and
+        ($provisioningState -isnot [string] -or
+            [string] $provisioningState -cne 'Succeeded')) {
+        $mismatches.Add('provisioningState')
+    }
+
+    $deploymentError = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'deploymentError'
+    if ($null -ne $deploymentError -and
+        ($deploymentError -isnot [string] -or
+            [string] $deploymentError -cne '')) {
+        $mismatches.Add('deploymentError')
+    }
+
+    $dataSource = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $properties `
+        -PropertyName 'dataSource'
+    if ($null -ne $dataSource -and
+        ($dataSource -isnot [string] -or
+            (-not [string]::IsNullOrWhiteSpace([string] $dataSource) -and
+                -not [string]::Equals(
+                    [string] $dataSource,
+                    $ExpectedWorkspaceResourceId,
+                    [StringComparison]::OrdinalIgnoreCase
+                )))) {
+        $mismatches.Add('dataSource')
+    }
+
+    $armResourceId = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $extendedProperties `
+        -PropertyName 'armResourceId'
+    if ($null -ne $armResourceId -and
+        ($armResourceId -isnot [string] -or
+            (-not [string]::IsNullOrWhiteSpace([string] $armResourceId) -and
+                -not [string]::Equals(
+                    [string] $armResourceId,
+                    $ExpectedWorkspaceResourceId,
+                    [StringComparison]::OrdinalIgnoreCase
+                )))) {
+        $mismatches.Add('extendedProperties.armResourceId')
+    }
+
+    $resourceName = Get-ArcIdentityOptionalPropertyValue `
+        -InputObject $resource `
+        -PropertyName 'name'
+    if ($null -ne $resourceName -and
+        ($resourceName -isnot [string] -or
+            (-not [string]::IsNullOrWhiteSpace([string] $resourceName) -and
+                -not [string]::Equals(
+                    [string] $resourceName,
+                    $ExpectedWorkspaceName,
+                    [StringComparison]::OrdinalIgnoreCase
+                )))) {
+        $mismatches.Add('extendedProperties.resource.name')
+    }
+
+    if ($mismatches.Count -gt 0) {
+        throw "Connector '$ExpectedName' has observable mismatch(es) in $($mismatches -join ', '); refusing to accept or overwrite it."
+    }
+}
+
 function Get-ArcIdentityResponseItems {
     param(
         [AllowNull()]
@@ -644,6 +858,60 @@ function Connect-ArcIdentitySreAgentApi {
     return $agent
 }
 
+function Format-ArcIdentitySreAgentApiError {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(100, 599)]
+        [int] $StatusCode,
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $ReasonPhrase,
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $ResponseBody,
+        [ValidateRange(1, 65536)]
+        [int] $MaxResponseBodyBytes = 4096,
+        [switch] $ResponseBodyReadFailed
+    )
+
+    $status = "HTTP $StatusCode"
+    if (-not [string]::IsNullOrWhiteSpace($ReasonPhrase)) {
+        $status += " ($($ReasonPhrase.Trim()))"
+    }
+    $prefix = "Azure SRE Agent data-plane request failed with $status."
+    if ($ResponseBodyReadFailed) {
+        return "$prefix Response body could not be read."
+    }
+    if ([string]::IsNullOrWhiteSpace($ResponseBody)) {
+        return "$prefix Response body was empty."
+    }
+
+    $responseDetails = $ResponseBody.Trim()
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    if ($utf8.GetByteCount($responseDetails) -gt $MaxResponseBodyBytes) {
+        $characters = $responseDetails.ToCharArray()
+        $bytes = [byte[]]::new($MaxResponseBodyBytes)
+        $charactersUsed = 0
+        $bytesUsed = 0
+        $completed = $false
+        $utf8.GetEncoder().Convert(
+            $characters,
+            0,
+            $characters.Length,
+            $bytes,
+            0,
+            $bytes.Length,
+            $true,
+            [ref] $charactersUsed,
+            [ref] $bytesUsed,
+            [ref] $completed
+        )
+        $responseDetails = $utf8.GetString($bytes, 0, $bytesUsed) +
+            " [truncated at $MaxResponseBodyBytes UTF-8 bytes]"
+    }
+    return "$prefix Response body: $responseDetails"
+}
+
 function Invoke-ArcIdentitySreAgentApi {
     param(
         [Parameter(Mandatory)]
@@ -686,11 +954,25 @@ function Invoke-ArcIdentitySreAgentApi {
             $response.StatusCode -eq [System.Net.HttpStatusCode]::NotFound) {
             return $null
         }
-        $response.EnsureSuccessStatusCode() | Out-Null
-        if ($null -eq $response.Content) {
-            return $null
+        $responseBody = $null
+        $responseBodyReadError = $null
+        if ($null -ne $response.Content) {
+            try {
+                $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            } catch {
+                $responseBodyReadError = $_.Exception
+            }
         }
-        $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            throw (Format-ArcIdentitySreAgentApiError `
+                    -StatusCode ([int] $response.StatusCode) `
+                    -ReasonPhrase $response.ReasonPhrase `
+                    -ResponseBody $responseBody `
+                    -ResponseBodyReadFailed:($null -ne $responseBodyReadError))
+        }
+        if ($null -ne $responseBodyReadError) {
+            throw "Azure SRE Agent data-plane request returned HTTP $([int] $response.StatusCode), but its response body could not be read."
+        }
         if ([string]::IsNullOrWhiteSpace($responseBody)) {
             return $null
         }
