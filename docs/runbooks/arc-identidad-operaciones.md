@@ -112,9 +112,9 @@ No proyectar `RenderedDescription`, nombres de usuario ni mensajes de eventos en
   -CorrelationId 'SYNTH-ID-REEMPLAZAR'
 ```
 
-El script exige al menos un 4101 autoritativo en LAW para cada `_ResourceId`, combina los recuentos LAW/local mediante el máximo, emite como máximo un 4102 por host, elimina Run Command y espera exactamente dos recuperaciones en LAW. Si el log Application local rotó pero LAW conserva el incidente, la recuperación sigue siendo válida; repetirla con el mismo ID no añade otra recuperación.
+El script exige al menos un 4101 autoritativo en LAW para cada `_ResourceId`, combina los recuentos LAW/local mediante el máximo, emite como máximo un 4102 por host, elimina Run Command y espera exactamente dos recuperaciones en LAW. Los 4102 son marcadores auditables e idempotentes; no intervienen en la condición KQL de la alerta. Si el log Application local rotó pero LAW conserva el incidente, la recuperación sigue siendo válida; repetirla con el mismo ID no añade otra recuperación.
 
-La regla debe auto-resolverse cuando la ventana de cinco minutos deje de contener la ráfaga. Si no se resuelve:
+La regla se auto-resuelve cuando la ventana móvil de cinco minutos deja de contener eventos 4101, con independencia del momento en que se emitan los 4102. Si no se resuelve:
 
 1. confirmar que no existen eventos 4101 nuevos con el mismo ID;
 2. revisar estado de la regla y latencia de Azure Monitor;
@@ -128,7 +128,7 @@ La regla debe auto-resolverse cuando la ventana de cinco minutos deje de contene
 4. La ráfaga es exactamente la acotada y contiene `demoSynthetic=true`.
 5. El informe no afirma que los hosts ejecuten AD FS/DC.
 6. El filtro y la tarea permanecen Review; el agente permanece Review/Low.
-7. La recuperación produce un único 4102 por host y la alerta se resuelve.
+7. La recuperación produce un único 4102 por host y la alerta se resuelve al salir los 4101 de su ventana móvil.
 8. No queda ningún Run Command `identityops-*`.
 
 ## Fallos y respuesta segura
