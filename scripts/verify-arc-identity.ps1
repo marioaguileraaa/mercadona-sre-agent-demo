@@ -450,29 +450,12 @@ $connector = Invoke-ArcIdentityAzJson `
         '--output', 'json'
     ) `
     -FailureMessage 'Unable to read the ArcBox Log Analytics SRE Agent connector.'
-$connectorProperties = Get-ArcIdentityOptionalPropertyValue `
-    -InputObject $connector `
-    -PropertyName 'properties'
-if (-not [string]::Equals(
-        [string] (
-            Get-ArcIdentityOptionalPropertyValue `
-                -InputObject $connectorProperties `
-                -PropertyName 'dataSource'
-        ),
-        $workspaceResourceId,
-        [StringComparison]::OrdinalIgnoreCase
-    ) -or
-    -not [string]::Equals(
-        [string] (
-            Get-ArcIdentityOptionalPropertyValue `
-                -InputObject $connectorProperties `
-                -PropertyName 'identity'
-        ),
-        $sreIdentityResourceId,
-        [StringComparison]::OrdinalIgnoreCase
-    )) {
-    throw 'The ArcBox Log Analytics connector is not scoped to the expected workspace and UAMI.'
-}
+Assert-ArcIdentityLogAnalyticsConnector `
+    -Connector $connector `
+    -ExpectedName 'arcbox-log-analytics' `
+    -ExpectedWorkspaceResourceId $workspaceResourceId `
+    -ExpectedWorkspaceName $WorkspaceName `
+    -ExpectedIdentity $sreIdentityResourceId
 
 try {
     $null = Connect-ArcIdentitySreAgentApi `

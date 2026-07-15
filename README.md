@@ -159,6 +159,8 @@ Detailed response procedures are in [`docs/runbooks/cart-memory-pressure.md`](do
 
 An isolated extension models an ADFS/domain-controller observability scenario on the existing ArcBox lab. Azure Arc, AMA, DCR, Log Analytics, alerts, and SRE Agent plumbing are real; `Mercadona.IdentityOps` events are explicitly synthetic (`demoSynthetic=true`) because the lab hosts do not run AD FS or AD DS. The additive DCR is events-only and reuses existing VM Insights data from `InsightsMetrics` rather than duplicating performance ingestion. The extension does not change the retail UI/API or replace existing ArcBox DCR associations.
 
+Azure Resource Manager may redact the connector workspace target in GET responses. Configuration and verification accept blank `dataSource`/extended target fields as provider-redacted, while still requiring the dedicated connector name, `LogAnalytics` type, expected UAMI, successful state when returned, and rejecting every observable nonblank target mismatch.
+
 Planning is the default and performs no deployment:
 
 ```powershell

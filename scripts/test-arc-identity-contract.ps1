@@ -611,6 +611,482 @@ Assert-True `
             -PropertyNames @('missing', 'value')) -eq 'expected'
     ) `
     -Case 'First strict-mode property lookup'
+
+$expectedSkillFilePaths = @(
+    'kql/arc-identity/fleet-heartbeat.kql',
+    'kql/arc-identity/data-freshness.kql',
+    'kql/arc-identity/synthetic-token-failure-burst.kql',
+    'kql/arc-identity/performance-correlation.kql',
+    'kql/arc-identity/extension-health.arg.kql',
+    'kql/arc-identity/change-tracking.kql'
+)
+$configureContractTokens = $null
+$configureContractErrors = $null
+$configureContractAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $scriptSources['configure-arc-identity-sre-agent.ps1'],
+    [ref] $configureContractTokens,
+    [ref] $configureContractErrors
+)
+Assert-True `
+    -Condition ($configureContractErrors.Count -eq 0) `
+    -Case 'Configurator parses for skill payload probe'
+$skillPathAssignments = @(
+    $configureContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$skillAdditionalFilePaths'
+    }, $true)
+)
+Assert-True `
+    -Condition ($skillPathAssignments.Count -eq 1) `
+    -Case 'Configurator has one skill additional file allowlist'
+$configuredSkillFilePaths = @(
+    & ([scriptblock]::Create($skillPathAssignments[0].Right.Extent.Text))
+)
+Assert-True `
+    -Condition (
+        ($configuredSkillFilePaths -join "`0") -ceq
+        ($expectedSkillFilePaths -join "`0")
+    ) `
+    -Case 'Configurator exact skill file allowlist and order'
+$skillAdditionalFiles = @(
+    Get-ArcIdentitySkillAdditionalFiles `
+        -RepositoryRoot $repoRoot `
+        -RelativePaths $configuredSkillFilePaths
+)
+$serializedSkillProbe = [ordered]@{
+    name = 'identity-infrastructure-operations'
+    type = 'Skill'
+    properties = [ordered]@{
+        additionalFiles = $skillAdditionalFiles
+    }
+} | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable -Depth 10
+$skillAdditionalFiles = @($serializedSkillProbe['properties']['additionalFiles'])
+Assert-True -Condition ($skillAdditionalFiles.Count -eq 6) -Case 'Six skill additional files'
+$strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+for ($index = 0; $index -lt $expectedSkillFilePaths.Count; $index++) {
+    $expectedRelativePath = $expectedSkillFilePaths[$index]
+    $additionalFile = $skillAdditionalFiles[$index]
+    Assert-True `
+        -Condition ($additionalFile -is [System.Collections.IDictionary]) `
+        -Case "Skill additional file is an object: $expectedRelativePath"
+    Assert-True `
+        -Condition ($additionalFile -isnot [string]) `
+        -Case "Skill additional file is not a path string: $expectedRelativePath"
+    Assert-True `
+        -Condition (
+            @($additionalFile.Keys).Count -eq 2 -and
+            $additionalFile.Contains('filePath') -and
+            $additionalFile.Contains('content')
+        ) `
+        -Case "Skill additional file has filePath and content: $expectedRelativePath"
+    Assert-True `
+        -Condition ($additionalFile['filePath'] -ceq $expectedRelativePath) `
+        -Case "Skill additional file allowlist order: $expectedRelativePath"
+    $expectedContent = $strictUtf8.GetString(
+        [System.IO.File]::ReadAllBytes(
+            (Join-Path $repoRoot $expectedRelativePath)
+        )
+    )
+    Assert-True `
+        -Condition (
+            -not [string]::IsNullOrWhiteSpace([string] $additionalFile['content']) -and
+            [string] $additionalFile['content'] -ceq $expectedContent
+        ) `
+        -Case "Skill additional file exact UTF-8 content: $expectedRelativePath"
+}
+$missingSkillFileError = $null
+try {
+    $null = @(
+        Get-ArcIdentitySkillAdditionalFiles `
+            -RepositoryRoot $repoRoot `
+            -RelativePaths @('kql/arc-identity/missing-required-file.kql')
+    )
+} catch {
+    $missingSkillFileError = $_.Exception.Message
+}
+Assert-True `
+    -Condition (
+        $missingSkillFileError -ceq
+        "Required SRE Agent skill file 'kql/arc-identity/missing-required-file.kql' does not exist."
+    ) `
+    -Case 'Missing skill file fails explicitly'
+$escapedSkillFileError = $null
+try {
+    $null = @(
+        Get-ArcIdentitySkillAdditionalFiles `
+            -RepositoryRoot $repoRoot `
+            -RelativePaths @('../outside-repository.kql')
+    )
+} catch {
+    $escapedSkillFileError = $_.Exception.Message
+}
+Assert-True `
+    -Condition (
+        $escapedSkillFileError -ceq
+        "Required SRE Agent skill file '../outside-repository.kql' resolves outside the repository root."
+    ) `
+    -Case 'Skill file path cannot escape repository root'
+
+$connectorName = 'arcbox-log-analytics'
+$connectorSubscriptionId = '11111111-2222-3333-4444-555555555555'
+$connectorWorkspaceName = 'law-arcbox-demo-001'
+$connectorWorkspaceResourceId = "/subscriptions/$connectorSubscriptionId/resourceGroups/rg-arc/providers/Microsoft.OperationalInsights/workspaces/$connectorWorkspaceName"
+$connectorIdentityResourceId = "/subscriptions/$connectorSubscriptionId/resourceGroups/rg-sre/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-sre"
+$visibleConnector = [pscustomobject]@{
+    name = "sre-agent/$connectorName"
+    properties = [pscustomobject]@{
+        dataConnectorType = 'LogAnalytics'
+        dataSource = $connectorWorkspaceResourceId.ToUpperInvariant()
+        extendedProperties = [pscustomobject]@{
+            armResourceId = $connectorWorkspaceResourceId
+            resource = [pscustomobject]@{
+                name = $connectorWorkspaceName
+            }
+        }
+        identity = $connectorIdentityResourceId.ToUpperInvariant()
+        source = 'Agent'
+        provisioningState = 'Succeeded'
+        deploymentError = ''
+    }
+}
+$redactedConnector = [pscustomobject]@{
+    name = $connectorName
+    properties = [pscustomobject]@{
+        dataConnectorType = 'LogAnalytics'
+        dataSource = $null
+        extendedProperties = [pscustomobject]@{
+            armResourceId = ''
+            resource = [pscustomobject]@{
+                name = ' '
+            }
+        }
+        identity = $connectorIdentityResourceId
+        source = 'Agent'
+        provisioningState = 'Succeeded'
+        deploymentError = $null
+    }
+}
+foreach ($connectorContract in @(
+        @{ Name = 'Visible exact connector accepted'; Connector = $visibleConnector },
+        @{ Name = 'Provider-redacted connector accepted'; Connector = $redactedConnector }
+    )) {
+    $connectorContractError = $null
+    try {
+        Assert-ArcIdentityLogAnalyticsConnector `
+            -Connector $connectorContract.Connector `
+            -ExpectedName $connectorName `
+            -ExpectedWorkspaceResourceId $connectorWorkspaceResourceId `
+            -ExpectedWorkspaceName $connectorWorkspaceName `
+            -ExpectedIdentity $connectorIdentityResourceId
+    } catch {
+        $connectorContractError = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition ($null -eq $connectorContractError) `
+        -Case $connectorContract.Name
+}
+$connectorMismatchCases = @(
+    @{
+        Name = 'Connector name mismatch rejected'
+        Field = 'name'
+        Mutate = { param($connector) $connector.name = 'different-connector' }
+    },
+    @{
+        Name = 'Connector name case mismatch rejected'
+        Field = 'name'
+        Mutate = { param($connector) $connector.name = 'ARCBOX-LOG-ANALYTICS' }
+    },
+    @{
+        Name = 'Connector type mismatch rejected'
+        Field = 'dataConnectorType'
+        Mutate = { param($connector) $connector.properties.dataConnectorType = 'ApplicationInsights' }
+    },
+    @{
+        Name = 'Connector identity mismatch rejected'
+        Field = 'identity'
+        Mutate = { param($connector) $connector.properties.identity = '/subscriptions/other/identities/other' }
+    },
+    @{
+        Name = 'Connector source mismatch rejected'
+        Field = 'source'
+        Mutate = { param($connector) $connector.properties.source = 'User' }
+    },
+    @{
+        Name = 'Connector blank source rejected'
+        Field = 'source'
+        Mutate = { param($connector) $connector.properties.source = ' ' }
+    },
+    @{
+        Name = 'Connector provisioning mismatch rejected'
+        Field = 'provisioningState'
+        Mutate = { param($connector) $connector.properties.provisioningState = 'Failed' }
+    },
+    @{
+        Name = 'Connector blank provisioning state rejected'
+        Field = 'provisioningState'
+        Mutate = { param($connector) $connector.properties.provisioningState = '' }
+    },
+    @{
+        Name = 'Connector deployment error rejected'
+        Field = 'deploymentError'
+        Mutate = { param($connector) $connector.properties.deploymentError = 'Synthetic connector failure' }
+    },
+    @{
+        Name = 'Connector whitespace deployment error rejected'
+        Field = 'deploymentError'
+        Mutate = { param($connector) $connector.properties.deploymentError = ' ' }
+    },
+    @{
+        Name = 'Connector visible data source mismatch rejected'
+        Field = 'dataSource'
+        Mutate = { param($connector) $connector.properties.dataSource = '/subscriptions/other/workspaces/other' }
+    },
+    @{
+        Name = 'Connector visible ARM resource mismatch rejected'
+        Field = 'extendedProperties.armResourceId'
+        Mutate = { param($connector) $connector.properties.extendedProperties.armResourceId = '/subscriptions/other/workspaces/other' }
+    },
+    @{
+        Name = 'Connector visible resource name mismatch rejected'
+        Field = 'extendedProperties.resource.name'
+        Mutate = { param($connector) $connector.properties.extendedProperties.resource.name = 'other-workspace' }
+    }
+)
+foreach ($mismatchCase in $connectorMismatchCases) {
+    $mismatchedConnector = $visibleConnector |
+        ConvertTo-Json -Depth 10 |
+        ConvertFrom-Json -Depth 10
+    & $mismatchCase.Mutate $mismatchedConnector
+    $mismatchError = $null
+    try {
+        Assert-ArcIdentityLogAnalyticsConnector `
+            -Connector $mismatchedConnector `
+            -ExpectedName $connectorName `
+            -ExpectedWorkspaceResourceId $connectorWorkspaceResourceId `
+            -ExpectedWorkspaceName $connectorWorkspaceName `
+            -ExpectedIdentity $connectorIdentityResourceId
+    } catch {
+        $mismatchError = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition (
+            -not [string]::IsNullOrWhiteSpace($mismatchError) -and
+            $mismatchError.Contains([string] $mismatchCase.Field, [StringComparison]::Ordinal) -and
+            $mismatchError.Contains('refusing to accept or overwrite it', [StringComparison]::Ordinal)
+        ) `
+        -Case $mismatchCase.Name
+}
+
+if ($null -eq ('ArcIdentityContractHttpMessageHandler' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class ArcIdentityContractHttpMessageHandler : HttpMessageHandler
+{
+    private readonly HttpStatusCode statusCode;
+    private readonly string reasonPhrase;
+    private readonly string responseBody;
+
+    public int RequestCount { get; private set; }
+    public string LastAuthorization { get; private set; }
+    public string LastRequestBody { get; private set; }
+
+    public ArcIdentityContractHttpMessageHandler(
+        int statusCode,
+        string reasonPhrase,
+        string responseBody)
+    {
+        this.statusCode = (HttpStatusCode)statusCode;
+        this.reasonPhrase = reasonPhrase;
+        this.responseBody = responseBody;
+    }
+
+    private HttpResponseMessage CreateResponse(HttpRequestMessage request)
+    {
+        RequestCount++;
+        LastAuthorization = request.Headers.Contains("Authorization")
+            ? string.Join(",", request.Headers.GetValues("Authorization"))
+            : null;
+        LastRequestBody = request.Content == null
+            ? null
+            : request.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        var response = new HttpResponseMessage(statusCode)
+        {
+            ReasonPhrase = reasonPhrase
+        };
+        if (responseBody != null)
+        {
+            response.Content = new StringContent(responseBody, Encoding.UTF8, "application/json");
+        }
+        return response;
+    }
+
+    protected override HttpResponseMessage Send(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        return CreateResponse(request);
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        return Task.FromResult(CreateResponse(request));
+    }
+}
+'@
+}
+
+function Invoke-ArcIdentityDataPlaneResponseProbe {
+    param(
+        [Parameter(Mandatory)]
+        [int] $StatusCode,
+        [Parameter(Mandatory)]
+        [string] $ReasonPhrase,
+        [AllowNull()]
+        [string] $ResponseBody,
+        [switch] $AllowNotFound
+    )
+
+    $tokenMarker = 'TOKEN_MUST_NOT_BE_ECHOED'
+    $requestBodyMarker = 'REQUEST_BODY_MUST_NOT_BE_ECHOED'
+    $handlerType = 'ArcIdentityContractHttpMessageHandler' -as [type]
+    $handler = [Activator]::CreateInstance(
+        $handlerType,
+        @($StatusCode, $ReasonPhrase, $ResponseBody)
+    )
+    Disconnect-ArcIdentitySreAgentApi
+    $script:ArcIdentitySreHttpClient = [System.Net.Http.HttpClient]::new($handler, $true)
+    $script:ArcIdentitySreEndpoint = 'https://sre-agent.invalid'
+    $script:ArcIdentitySreHeaders = @{
+        Authorization = "Bearer $tokenMarker"
+    }
+
+    $result = $null
+    $errorMessage = $null
+    try {
+        $result = Invoke-ArcIdentitySreAgentApi `
+            -Method Put `
+            -Path '/api/v2/extendedAgent/skills/identity-infrastructure-operations' `
+            -Body @{ marker = $requestBodyMarker } `
+            -AllowNotFound:$AllowNotFound
+    } catch {
+        $errorMessage = $_.Exception.Message
+    } finally {
+        Disconnect-ArcIdentitySreAgentApi
+    }
+
+    return [pscustomobject]@{
+        Result = $result
+        ErrorMessage = $errorMessage
+        RequestCount = $handler.RequestCount
+        LastAuthorization = $handler.LastAuthorization
+        LastRequestBody = $handler.LastRequestBody
+        TokenMarker = $tokenMarker
+        RequestBodyMarker = $requestBodyMarker
+    }
+}
+
+$validationResponseBody = '{"detail":"The JSON value could not be converted to Agent.Web.Views.v2.SkillSubFileView. Path: $[0]"}'
+$dataPlaneFailureProbe = Invoke-ArcIdentityDataPlaneResponseProbe `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody $validationResponseBody
+Assert-True -Condition ($dataPlaneFailureProbe.RequestCount -eq 1) -Case 'Data-plane failure sends one request'
+Assert-True `
+    -Condition (
+        $dataPlaneFailureProbe.LastAuthorization.Contains(
+            $dataPlaneFailureProbe.TokenMarker,
+            [StringComparison]::Ordinal
+        ) -and
+        $dataPlaneFailureProbe.LastRequestBody.Contains(
+            $dataPlaneFailureProbe.RequestBodyMarker,
+            [StringComparison]::Ordinal
+        )
+    ) `
+    -Case 'Data-plane safety probe includes private request markers'
+Assert-True `
+    -Condition (
+        $dataPlaneFailureProbe.ErrorMessage.Contains('HTTP 400 (Bad Request)', [StringComparison]::Ordinal) -and
+        $dataPlaneFailureProbe.ErrorMessage.Contains('Agent.Web.Views.v2.SkillSubFileView', [StringComparison]::Ordinal) -and
+        $dataPlaneFailureProbe.ErrorMessage.Contains('Path: $[0]', [StringComparison]::Ordinal)
+    ) `
+    -Case 'Data-plane failure reports status and validation response'
+Assert-True `
+    -Condition (
+        -not $dataPlaneFailureProbe.ErrorMessage.Contains(
+            $dataPlaneFailureProbe.TokenMarker,
+            [StringComparison]::Ordinal
+        ) -and
+        -not $dataPlaneFailureProbe.ErrorMessage.Contains(
+            $dataPlaneFailureProbe.RequestBodyMarker,
+            [StringComparison]::Ordinal
+        )
+    ) `
+    -Case 'Data-plane failure omits authorization and request body'
+
+$emptyDataPlaneFailureProbe = Invoke-ArcIdentityDataPlaneResponseProbe `
+    -StatusCode 500 `
+    -ReasonPhrase 'Internal Server Error' `
+    -ResponseBody ' '
+Assert-True `
+    -Condition (
+        $emptyDataPlaneFailureProbe.ErrorMessage -ceq
+        'Azure SRE Agent data-plane request failed with HTTP 500 (Internal Server Error). Response body was empty.'
+    ) `
+    -Case 'Data-plane failure reports empty response body'
+$notFoundProbe = Invoke-ArcIdentityDataPlaneResponseProbe `
+    -StatusCode 404 `
+    -ReasonPhrase 'Not Found' `
+    -ResponseBody '{"detail":"not found"}' `
+    -AllowNotFound
+Assert-True `
+    -Condition ($null -eq $notFoundProbe.ErrorMessage -and $null -eq $notFoundProbe.Result) `
+    -Case 'AllowNotFound remains nonthrowing'
+$boundedDataPlaneError = Format-ArcIdentitySreAgentApiError `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody ('x' * 5000) `
+    -MaxResponseBodyBytes 128
+Assert-True `
+    -Condition (
+        $boundedDataPlaneError.Contains('x' * 128, [StringComparison]::Ordinal) -and
+        -not $boundedDataPlaneError.Contains('x' * 129, [StringComparison]::Ordinal) -and
+        $boundedDataPlaneError.Contains('[truncated at 128 UTF-8 bytes]', [StringComparison]::Ordinal)
+    ) `
+    -Case 'Data-plane error response is bounded'
+$unicodeDataPlaneError = Format-ArcIdentitySreAgentApiError `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody ([string] ([char] 0x00E9) * 4096)
+$unicodeBodyPrefix = 'Response body: '
+$unicodeBodyStart = $unicodeDataPlaneError.IndexOf(
+    $unicodeBodyPrefix,
+    [StringComparison]::Ordinal
+) + $unicodeBodyPrefix.Length
+$unicodeBodySuffix = ' [truncated at 4096 UTF-8 bytes]'
+$unicodeBodyEnd = $unicodeDataPlaneError.LastIndexOf(
+    $unicodeBodySuffix,
+    [StringComparison]::Ordinal
+)
+$unicodeResponseDetails = $unicodeDataPlaneError.Substring(
+    $unicodeBodyStart,
+    $unicodeBodyEnd - $unicodeBodyStart
+)
+Assert-True `
+    -Condition (
+        [System.Text.Encoding]::UTF8.GetByteCount($unicodeResponseDetails) -eq 4096 -and
+        -not $unicodeResponseDetails.Contains([string] ([char] 0xFFFD), [StringComparison]::Ordinal)
+    ) `
+    -Case 'Data-plane error cap is UTF-8 byte bounded'
+
 Assert-True `
     -Condition (
         (Get-ArcIdentityMachineResourceId `
@@ -1173,6 +1649,10 @@ $postConnectorWaitIndex = $configureSource.IndexOf(
     '$agentAfterConnectorPut = Wait-ArcIdentitySreAgentProvisioningSucceeded',
     [StringComparison]::Ordinal
 )
+$postConnectorValidationIndex = $configureSource.IndexOf(
+    '$createdConnector = Invoke-ArcIdentityAzJson',
+    [StringComparison]::Ordinal
+)
 $applyDataPlaneBoundaryIndex = $configureSource.IndexOf(
     'Assert-ArcIdentitySreExtensionResourceCollisions `',
     $postConnectorWaitIndex,
@@ -1193,9 +1673,10 @@ Assert-True `
 Assert-True `
     -Condition (
         $connectorMutationIndex -lt $postConnectorWaitIndex -and
-        $postConnectorWaitIndex -lt $applyDataPlaneBoundaryIndex
+        $postConnectorWaitIndex -lt $postConnectorValidationIndex -and
+        $postConnectorValidationIndex -lt $applyDataPlaneBoundaryIndex
     ) `
-    -Case 'Connector PUT wait precedes SRE data-plane boundary'
+    -Case 'Connector PUT wait and validation precede SRE data-plane boundary'
 Assert-True `
     -Condition (
         [regex]::Matches(
@@ -1232,10 +1713,30 @@ Assert-Contains `
     -Source $commonSource `
     -Expected '[int] $PollIntervalSeconds = 10' `
     -Case 'SRE Agent wait default poll interval'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected 'function Assert-ArcIdentityLogAnalyticsConnector' `
+    -Case 'Shared connector assertion'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected 'function Get-ArcIdentitySkillAdditionalFiles' `
+    -Case 'Shared skill file loader'
+Assert-Contains `
+    -Source $commonSource `
+    -Expected 'function Format-ArcIdentitySreAgentApiError' `
+    -Case 'Bounded data-plane error formatter'
+Assert-NotMatches `
+    -Source $commonSource `
+    -Pattern '\.EnsureSuccessStatusCode\(' `
+    -Case 'Data-plane errors are read before disposal'
 Assert-NotMatches `
     -Source $commonSource `
     -Pattern '(?i)Write-(?:Host|Output|Verbose|Debug|Information|Warning)[^\r\n]*(?:bodyJson|\$Body)' `
     -Case 'ARM helper does not print request bodies'
+Assert-NotMatches `
+    -Source $commonSource `
+    -Pattern '(?i)throw[^\r\n]*(?:Authorization|Bearer|ArcIdentitySreHeaders|\$Body(?:\W|$))' `
+    -Case 'Data-plane errors do not echo authorization or request bodies'
 foreach ($requiredContract in @(
         'identity-infrastructure-analyzer',
         'identity-infrastructure-operations',
@@ -1258,6 +1759,30 @@ Assert-Contains -Source $configureSource -Expected "-PropertyName 'mode') -ne 'R
 Assert-Contains -Source $configureSource -Expected "-PropertyName 'accessLevel') -ne 'Low'" -Case 'Low access preflight'
 Assert-Contains -Source $configureSource -Expected 'refusing to overwrite it' -Case 'SRE resource collision refusal'
 Assert-Contains -Source $configureSource -Expected 'Perf table is expected' -Case 'SRE instructions preserve existing InsightsMetrics source'
+Assert-Contains `
+    -Source $configureSource `
+    -Expected 'Get-ArcIdentitySkillAdditionalFiles' `
+    -Case 'Configurator loads checked-in skill files'
+Assert-Contains `
+    -Source $configureSource `
+    -Expected 'additionalFiles = $skillAdditionalFiles' `
+    -Case 'Skill payload uses file objects'
+Assert-NotMatches `
+    -Source $configureSource `
+    -Pattern '(?s)additionalFiles\s*=\s*@\(\s*[''"]kql/arc-identity/' `
+    -Case 'Skill payload has no string-only additionalFiles'
+Assert-Contains `
+    -Source $configureSource `
+    -Expected 'Assert-ArcIdentityLogAnalyticsConnector' `
+    -Case 'Configurator uses shared connector assertion'
+Assert-True `
+    -Condition (
+        [regex]::Matches(
+            $configureSource,
+            '(?m)^\s*Assert-ArcIdentityLogAnalyticsConnector\s+`'
+        ).Count -eq 2
+    ) `
+    -Case 'Configurator validates existing and newly created connectors'
 $retailConfigureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'configure-sre-agent.ps1') -Raw
 Assert-Contains -Source $retailConfigureSource -Expected "titleContains = 'mercadona'" -Case 'Existing retail filter baseline'
 Assert-NotMatches -Source $configureSource -Pattern "titleContains\s*=\s*'mercadona'" -Case 'Identity filter does not overlap retail namespace'
@@ -1269,16 +1794,13 @@ Assert-Contains -Source $verifySource -Expected '$autoMitigate = Get-ArcIdentity
 Assert-Contains -Source $verifySource -Expected '$null -ne $autoMitigate -and $autoMitigate -ne $true' -Case 'Verification rejects conflicting autoMitigate'
 Assert-NotMatches -Source $verifySource -Pattern '\$properties\.autoMitigate' -Case 'Verification does not require autoMitigate response'
 Assert-Contains -Source $verifySource -Expected "-ExpectedOverrideQueryTimeRange 'PT30M'" -Case 'Verification expects supported freshness override'
+Assert-Contains `
+    -Source $verifySource `
+    -Expected 'Assert-ArcIdentityLogAnalyticsConnector' `
+    -Case 'Verifier uses shared connector assertion'
 
 $kqlDirectory = Join-Path $repoRoot 'kql\arc-identity'
-$requiredKqlFiles = @(
-    'fleet-heartbeat.kql',
-    'data-freshness.kql',
-    'synthetic-token-failure-burst.kql',
-    'performance-correlation.kql',
-    'extension-health.arg.kql',
-    'change-tracking.kql'
-)
+$requiredKqlFiles = @($expectedSkillFilePaths | ForEach-Object { Split-Path -Leaf $_ })
 foreach ($kqlFileName in $requiredKqlFiles) {
     $kqlPath = Join-Path $kqlDirectory $kqlFileName
     Assert-True -Condition (Test-Path -LiteralPath $kqlPath -PathType Leaf) -Case "KQL asset exists: $kqlFileName"
