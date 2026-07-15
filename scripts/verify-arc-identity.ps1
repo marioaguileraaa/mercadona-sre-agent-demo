@@ -145,7 +145,9 @@ foreach ($requiredXPathFragment in @(
         'System!*[System[(Level=1 or Level=2 or Level=3)]]',
         "Provider[@Name!='Mercadona.IdentityOps']"
     )) {
-    if ($null -eq ($xPathQueries | Where-Object { $_ -like "*$requiredXPathFragment*" } | Select-Object -First 1)) {
+    if ($null -eq ($xPathQueries | Where-Object {
+                ([string] $_).Contains($requiredXPathFragment, [StringComparison]::Ordinal)
+            } | Select-Object -First 1)) {
         throw "The dedicated DCR is missing XPath contract '$requiredXPathFragment'."
     }
 }
