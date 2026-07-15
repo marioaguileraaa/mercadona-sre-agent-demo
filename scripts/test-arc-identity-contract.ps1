@@ -2487,9 +2487,102 @@ foreach ($scheduledTaskStateCase in $scheduledTaskStateCases) {
             -Case "Verifier rejects scheduled task: $($scheduledTaskStateCase.Name)"
     }
 }
+$alertOverrideAssignments = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -ceq '$overrideQueryTimeRange'
+    }, $true)
+)
+$alertOverrideChecks = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains(
+            'does not preserve overrideQueryTimeRange',
+            [StringComparison]::Ordinal
+        )
+    }, $true)
+)
+Assert-True `
+    -Condition (
+        $alertOverrideAssignments.Count -eq 1 -and
+        $alertOverrideChecks.Count -eq 1
+    ) `
+    -Case 'Verifier has one production overrideQueryTimeRange contract'
+$alertOverrideContractStart = $alertOverrideAssignments[0].Extent.StartOffset
+$alertOverrideContractEnd = $alertOverrideChecks[0].Extent.EndOffset
+$alertOverrideValidationContract = [scriptblock]::Create(
+    @'
+param(
+    [AllowNull()]
+    [object] $properties,
+    [AllowNull()]
+    [string] $ExpectedOverrideQueryTimeRange,
+    [string] $AlertName = 'alert-freshness-probe'
+)
+'@ +
+    $verifySource.Substring(
+        $alertOverrideContractStart,
+        $alertOverrideContractEnd - $alertOverrideContractStart
+    )
+)
+$alertOverrideProbeCases = @(
+    [pscustomobject]@{
+        Name = 'absent token override'
+        Properties = '{}' | ConvertFrom-Json
+        ExpectedOverrideQueryTimeRange = $null
+        ExpectedError = $null
+    }
+    [pscustomobject]@{
+        Name = 'freshness PT30M override'
+        Properties = '{"overrideQueryTimeRange":"PT30M"}' | ConvertFrom-Json
+        ExpectedOverrideQueryTimeRange = 'PT30M'
+        ExpectedError = $null
+    }
+    [pscustomobject]@{
+        Name = 'missing freshness override'
+        Properties = '{}' | ConvertFrom-Json
+        ExpectedOverrideQueryTimeRange = 'PT30M'
+        ExpectedError = "Alert 'alert-freshness-probe' does not preserve overrideQueryTimeRange 'PT30M'."
+    }
+    [pscustomobject]@{
+        Name = 'wrong freshness override'
+        Properties = '{"overrideQueryTimeRange":"PT20M"}' | ConvertFrom-Json
+        ExpectedOverrideQueryTimeRange = 'PT30M'
+        ExpectedError = "Alert 'alert-freshness-probe' does not preserve overrideQueryTimeRange 'PT30M'."
+    }
+)
+$alertOverrideProbeErrors = @{}
+foreach ($alertOverrideProbeCase in $alertOverrideProbeCases) {
+    $alertOverrideProbeError = $null
+    try {
+        $null = & $alertOverrideValidationContract `
+            -properties $alertOverrideProbeCase.Properties `
+            -ExpectedOverrideQueryTimeRange $alertOverrideProbeCase.ExpectedOverrideQueryTimeRange
+    } catch {
+        $alertOverrideProbeError = $_.Exception.Message
+    }
+    $alertOverrideProbeErrors[$alertOverrideProbeCase.Name] = $alertOverrideProbeError
+    Assert-True `
+        -Condition ($alertOverrideProbeError -ceq $alertOverrideProbeCase.ExpectedError) `
+        -Case "Verifier production alert contract: $($alertOverrideProbeCase.Name)"
+}
+Assert-NotMatches `
+    -Source ([string] $alertOverrideProbeErrors['missing freshness override']) `
+    -Pattern "The property 'overrideQueryTimeRange' cannot be found" `
+    -Case 'Missing freshness override returns a contract error instead of a StrictMode property exception'
+
+Assert-Contains -Source $verifySource -Expected '$provisioningState = Get-ArcIdentityFirstPropertyValue' -Case 'Verification tolerates absent provisioningState'
 Assert-Contains -Source $verifySource -Expected '$autoMitigate = Get-ArcIdentityOptionalPropertyValue' -Case 'Verification tolerates absent autoMitigate'
 Assert-Contains -Source $verifySource -Expected '$null -ne $autoMitigate -and $autoMitigate -ne $true' -Case 'Verification rejects conflicting autoMitigate'
-Assert-NotMatches -Source $verifySource -Pattern '\$properties\.autoMitigate' -Case 'Verification does not require autoMitigate response'
+Assert-Contains -Source $verifySource -Expected '$overrideQueryTimeRange = Get-ArcIdentityOptionalPropertyValue' -Case 'Verification tolerates absent overrideQueryTimeRange'
+Assert-Contains -Source $verifySource -Expected '[string]::IsNullOrWhiteSpace($ExpectedOverrideQueryTimeRange)' -Case 'Verification treats a null-bound string expectation as absent'
+Assert-NotMatches -Source $verifySource -Pattern '\$properties\.(?:provisioningState|autoMitigate|overrideQueryTimeRange)' -Case 'Verification does not directly read optional alert response fields'
+Assert-NotMatches `
+    -Source $verifySource `
+    -Pattern '\$(?:agent|agentProperties|subagent|subagentProperties|skill|skillProperties|filter|filterProperties|scheduledTask|scheduledTaskProperties|connector)\.(?:properties|actionConfiguration|knowledgeGraphConfiguration|managedResources|tools|skillContent|agentMode|handlingAgent|titleContains|priorities|cronExpression|isEnabled|status|extendedProperties)' `
+    -Case 'Verifier does not directly read optional SRE GET response fields'
 Assert-Contains -Source $verifySource -Expected "-ExpectedOverrideQueryTimeRange 'PT30M'" -Case 'Verification expects supported freshness override'
 Assert-Contains `
     -Source $verifySource `
