@@ -453,6 +453,164 @@ function Invoke-ArcIdentityArmRestBodyProbe {
     }
 }
 
+function Invoke-ArcIdentityLogAnalyticsQueryProbe {
+    $subscriptionId = '11111111-2222-3333-4444-555555555555'
+    $workspaceCustomerId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    $firstResourceId = "/subscriptions/$subscriptionId/resourceGroups/rg-arcbox-itpro-weu-002/providers/Microsoft.HybridCompute/machines/ArcBox-Win2K22"
+    $secondResourceId = "/subscriptions/$subscriptionId/resourceGroups/rg-arcbox-itpro-weu-002/providers/Microsoft.HybridCompute/machines/ArcBox-Win2K25"
+    $successQuery = @"
+Heartbeat
+| where _ResourceId in (dynamic(["$firstResourceId", "$secondResourceId"]))
+| project ResourceId = _ResourceId, Healthy = true
+"@
+    $singleRowQuery = "$successQuery`n| take 1"
+    $emptyRowsQuery = "$successQuery`n| where false"
+    $failureQuery = "$successQuery`n| where ResourceId != `"$firstResourceId`""
+    $calls = [System.Collections.Generic.List[object]]::new()
+
+    function Get-FakeAzArgumentValue {
+        param(
+            [Parameter(Mandatory)]
+            [string[]] $Arguments,
+            [Parameter(Mandatory)]
+            [string] $Name
+        )
+
+        $index = [Array]::IndexOf($Arguments, $Name)
+        if ($index -lt 0 -or $index -ge ($Arguments.Count - 1)) {
+            throw "Fake Azure CLI call did not include '$Name'."
+        }
+        return $Arguments[$index + 1]
+    }
+
+    function az {
+        [string[]] $azArguments = @($args | ForEach-Object { [string] $_ })
+        $global:LASTEXITCODE = 0
+        if ($azArguments.Count -eq 0 -or $azArguments[0] -cne 'rest') {
+            throw "Unexpected fake Azure CLI call: $($azArguments -join ' ')"
+        }
+
+        $bodyIndexes = @(
+            for ($index = 0; $index -lt $azArguments.Count; $index++) {
+                if ($azArguments[$index] -ceq '--body') {
+                    $index
+                }
+            }
+        )
+        if ($bodyIndexes.Count -ne 1) {
+            throw 'Log Analytics REST must pass exactly one --body argument.'
+        }
+        $bodyIndex = $bodyIndexes[0]
+        if ($bodyIndex -ge ($azArguments.Count - 1)) {
+            throw 'Log Analytics REST --body did not include a value.'
+        }
+        $bodyArgument = $azArguments[$bodyIndex + 1]
+        if (-not $bodyArgument.StartsWith('@', [StringComparison]::Ordinal)) {
+            throw "Log Analytics REST body was not passed as an @file argument: '$bodyArgument'."
+        }
+        $bodyPath = $bodyArgument.Substring(1)
+        if (-not [System.IO.Path]::IsPathFullyQualified($bodyPath)) {
+            throw "Log Analytics REST body path was not absolute: '$bodyPath'."
+        }
+        if (-not (Test-Path -LiteralPath $bodyPath -PathType Leaf)) {
+            throw "Log Analytics REST body file did not exist during the Azure CLI call: '$bodyPath'."
+        }
+
+        $bodyBytes = [System.IO.File]::ReadAllBytes($bodyPath)
+        $hasUtf8Bom = $bodyBytes.Count -ge 3 -and
+            $bodyBytes[0] -eq 0xEF -and
+            $bodyBytes[1] -eq 0xBB -and
+            $bodyBytes[2] -eq 0xBF
+        $bodyText = [System.Text.UTF8Encoding]::new($false, $true).GetString($bodyBytes)
+        $bodyDocument = $bodyText | ConvertFrom-Json -AsHashtable -Depth 100
+        $calls.Add([pscustomobject]@{
+                Arguments = [string[]] $azArguments.Clone()
+                Method = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--method'
+                Subscription = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--subscription'
+                Url = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--url'
+                Resource = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--resource'
+                Header = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--headers'
+                Output = Get-FakeAzArgumentValue -Arguments $azArguments -Name '--output'
+                BodyArgument = $bodyArgument
+                BodyPath = $bodyPath
+                BodyDocument = $bodyDocument
+                HasUtf8Bom = $hasUtf8Bom
+            })
+
+        if ($bodyDocument['query'] -ceq $failureQuery) {
+            $global:LASTEXITCODE = 1
+            return
+        }
+        $responseRows = [System.Collections.Generic.List[object]]::new()
+        if ($bodyDocument['query'] -ceq $successQuery) {
+            $responseRows.Add([object[]]@($firstResourceId, $true))
+            $responseRows.Add([object[]]@($secondResourceId, $false))
+        } elseif ($bodyDocument['query'] -ceq $singleRowQuery) {
+            $responseRows.Add([object[]]@($firstResourceId, $true))
+        } elseif ($bodyDocument['query'] -cne $emptyRowsQuery) {
+            throw 'Fake Azure CLI received an unexpected Log Analytics query.'
+        }
+        return ConvertTo-Json -InputObject ([ordered]@{
+                tables = @(
+                    [ordered]@{
+                        name = 'PrimaryResult'
+                        columns = @(
+                            [ordered]@{ name = 'ResourceId'; type = 'string' },
+                            [ordered]@{ name = 'Healthy'; type = 'bool' }
+                        )
+                        rows = $responseRows.ToArray()
+                    }
+                )
+            }) -Depth 10 -Compress
+    }
+
+    $successRows = @(
+        Invoke-ArcIdentityLogAnalyticsQuery `
+            -SubscriptionId $subscriptionId `
+            -WorkspaceCustomerId $workspaceCustomerId `
+            -Query $successQuery
+    )
+    $singleRowRows = @(
+        Invoke-ArcIdentityLogAnalyticsQuery `
+            -SubscriptionId $subscriptionId `
+            -WorkspaceCustomerId $workspaceCustomerId `
+            -Query $singleRowQuery
+    )
+    $emptyRows = @(
+        Invoke-ArcIdentityLogAnalyticsQuery `
+            -SubscriptionId $subscriptionId `
+            -WorkspaceCustomerId $workspaceCustomerId `
+            -Query $emptyRowsQuery
+    )
+    $failureMessage = $null
+    try {
+        Invoke-ArcIdentityLogAnalyticsQuery `
+            -SubscriptionId $subscriptionId `
+            -WorkspaceCustomerId $workspaceCustomerId `
+            -Query $failureQuery
+    } catch {
+        $failureMessage = $_.Exception.Message
+    } finally {
+        $global:LASTEXITCODE = 0
+    }
+
+    return [pscustomobject]@{
+        Calls = @($calls)
+        SuccessRows = @($successRows)
+        SingleRowRows = @($singleRowRows)
+        EmptyRows = @($emptyRows)
+        FailureMessage = $failureMessage
+        SubscriptionId = $subscriptionId
+        WorkspaceCustomerId = $workspaceCustomerId
+        SuccessQuery = $successQuery
+        SingleRowQuery = $singleRowQuery
+        EmptyRowsQuery = $emptyRowsQuery
+        FailureQuery = $failureQuery
+        FirstResourceId = $firstResourceId
+        SecondResourceId = $secondResourceId
+    }
+}
+
 function Invoke-ArcIdentitySreAgentWaitProbe {
     param(
         [Parameter(Mandatory)]
@@ -611,6 +769,130 @@ Assert-True `
             -PropertyNames @('missing', 'value')) -eq 'expected'
     ) `
     -Case 'First strict-mode property lookup'
+
+$logAnalyticsQueryProbe = Invoke-ArcIdentityLogAnalyticsQueryProbe
+$logAnalyticsQueryCalls = @($logAnalyticsQueryProbe.Calls)
+Assert-True `
+    -Condition ($logAnalyticsQueryCalls.Count -eq 4) `
+    -Case 'Log Analytics query row-shape and failure calls'
+Assert-True `
+    -Condition ((@($logAnalyticsQueryCalls.BodyPath | Sort-Object -Unique)).Count -eq 4) `
+    -Case 'Log Analytics calls use unique temporary body files'
+$expectedLogAnalyticsQueries = @(
+    $logAnalyticsQueryProbe.SuccessQuery,
+    $logAnalyticsQueryProbe.SingleRowQuery,
+    $logAnalyticsQueryProbe.EmptyRowsQuery,
+    $logAnalyticsQueryProbe.FailureQuery
+)
+for ($callIndex = 0; $callIndex -lt $logAnalyticsQueryCalls.Count; $callIndex++) {
+    $logAnalyticsQueryCall = $logAnalyticsQueryCalls[$callIndex]
+    $expectedQuery = $expectedLogAnalyticsQueries[$callIndex]
+    $bodyArgumentIndexes = @(
+        for ($argumentIndex = 0; $argumentIndex -lt $logAnalyticsQueryCall.Arguments.Count; $argumentIndex++) {
+            if ($logAnalyticsQueryCall.Arguments[$argumentIndex] -ceq '--body') {
+                $argumentIndex
+            }
+        }
+    )
+    Assert-True `
+        -Condition ($bodyArgumentIndexes.Count -eq 1) `
+        -Case 'Single Log Analytics --body option'
+    Assert-True `
+        -Condition ($logAnalyticsQueryCall.BodyArgument -ceq "@$($logAnalyticsQueryCall.BodyPath)") `
+        -Case 'Log Analytics --body is exactly one @file argument'
+    Assert-True `
+        -Condition ([System.IO.Path]::IsPathFullyQualified($logAnalyticsQueryCall.BodyPath)) `
+        -Case 'Log Analytics body file path is absolute'
+    Assert-True `
+        -Condition (-not $logAnalyticsQueryCall.HasUtf8Bom) `
+        -Case 'Log Analytics body file is UTF-8 without BOM'
+    Assert-True `
+        -Condition (-not (Test-Path -LiteralPath $logAnalyticsQueryCall.BodyPath)) `
+        -Case 'Log Analytics body file cleanup after Azure CLI returns'
+    Assert-True `
+        -Condition (
+            $logAnalyticsQueryCall.BodyDocument.Keys.Count -eq 1 -and
+            $logAnalyticsQueryCall.BodyDocument.Contains('query') -and
+            $logAnalyticsQueryCall.BodyDocument['query'] -ceq $expectedQuery
+        ) `
+        -Case 'Log Analytics JSON body preserves exact KQL'
+    Assert-True `
+        -Condition ($logAnalyticsQueryCall.Method -ceq 'post') `
+        -Case 'Log Analytics REST POST method'
+    Assert-True `
+        -Condition ($logAnalyticsQueryCall.Subscription -ceq $logAnalyticsQueryProbe.SubscriptionId) `
+        -Case 'Log Analytics subscription context'
+    Assert-True `
+        -Condition (
+            $logAnalyticsQueryCall.Url -ceq
+            "https://api.loganalytics.azure.com/v1/workspaces/$($logAnalyticsQueryProbe.WorkspaceCustomerId)/query"
+        ) `
+        -Case 'Log Analytics query URL'
+    Assert-True `
+        -Condition ($logAnalyticsQueryCall.Resource -ceq 'https://api.loganalytics.io') `
+        -Case 'Log Analytics token resource'
+    Assert-True `
+        -Condition ($logAnalyticsQueryCall.Header -ceq 'Content-Type=application/json') `
+        -Case 'Log Analytics content-type header'
+    Assert-True `
+        -Condition ($logAnalyticsQueryCall.Output -ceq 'json') `
+        -Case 'Log Analytics JSON output'
+    Assert-True `
+        -Condition (
+            @($logAnalyticsQueryCall.Arguments | Where-Object {
+                    $_ -ceq '--analytics-query' -or $_ -ceq $expectedQuery
+                }).Count -eq 0
+        ) `
+        -Case 'Log Analytics KQL is not passed through the command line'
+}
+Assert-True `
+    -Condition (
+        $logAnalyticsQueryProbe.SuccessQuery.Contains(
+            "dynamic([`"$($logAnalyticsQueryProbe.FirstResourceId)`", `"$($logAnalyticsQueryProbe.SecondResourceId)`"])",
+            [StringComparison]::Ordinal
+        )
+    ) `
+    -Case 'Log Analytics probe covers quoted resource IDs'
+$compatibleLogAnalyticsRows = @(
+    Get-ArcIdentityResponseItems `
+        -Response $logAnalyticsQueryProbe.SuccessRows `
+        -PropertyNames @('tables', 'value')
+)
+Assert-True `
+    -Condition (
+        $compatibleLogAnalyticsRows.Count -eq 2 -and
+        $compatibleLogAnalyticsRows[0].ResourceId -ceq $logAnalyticsQueryProbe.FirstResourceId -and
+        $compatibleLogAnalyticsRows[0].Healthy -eq $true -and
+        $compatibleLogAnalyticsRows[1].ResourceId -ceq $logAnalyticsQueryProbe.SecondResourceId -and
+        $compatibleLogAnalyticsRows[1].Healthy -eq $false
+    ) `
+    -Case 'Log Analytics REST rows remain response-item compatible'
+$compatibleSingleLogAnalyticsRow = @(
+    Get-ArcIdentityResponseItems `
+        -Response $logAnalyticsQueryProbe.SingleRowRows `
+        -PropertyNames @('tables', 'value')
+)
+Assert-True `
+    -Condition (
+        $compatibleSingleLogAnalyticsRow.Count -eq 1 -and
+        $compatibleSingleLogAnalyticsRow[0].ResourceId -ceq $logAnalyticsQueryProbe.FirstResourceId -and
+        $compatibleSingleLogAnalyticsRow[0].Healthy -eq $true
+    ) `
+    -Case 'Single Log Analytics REST row preserves its columns'
+$compatibleEmptyLogAnalyticsRows = @(
+    Get-ArcIdentityResponseItems `
+        -Response $logAnalyticsQueryProbe.EmptyRows `
+        -PropertyNames @('tables', 'value')
+)
+Assert-True `
+    -Condition ($compatibleEmptyLogAnalyticsRows.Count -eq 0) `
+    -Case 'Empty Log Analytics REST rows remain empty'
+Assert-True `
+    -Condition (
+        $logAnalyticsQueryProbe.FailureMessage -ceq
+        'Unable to query the ArcBox Log Analytics workspace.'
+    ) `
+    -Case 'Log Analytics query failure remains explicit'
 
 $expectedSkillFilePaths = @(
     'kql/arc-identity/fleet-heartbeat.kql',
@@ -1790,6 +2072,218 @@ $verifySource = $scriptSources['verify-arc-identity.ps1']
 Assert-Contains -Source $verifySource -Expected '$freshnessLookbackMinutes = $MaximumIngestionAgeMinutes + 5' -Case 'Verification lookback follows accepted freshness threshold'
 Assert-Contains -Source $verifySource -Expected 'MSVMI-ama-vmi-default-dcr' -Case 'Verification preserves existing VM Insights DCR'
 Assert-Contains -Source $verifySource -Expected 'no duplicate performance-counter source' -Case 'Verification rejects duplicate counters'
+$verifyContractTokens = $null
+$verifyContractErrors = $null
+$verifyContractAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $verifySource,
+    [ref] $verifyContractTokens,
+    [ref] $verifyContractErrors
+)
+Assert-True `
+    -Condition ($verifyContractErrors.Count -eq 0) `
+    -Case 'Verifier parses for DCR source cardinality probe'
+$countValidatedOptionalArrayNames = @(
+    '$windowsEventLogs',
+    '$performanceCounters',
+    '$dcrDataFlows',
+    '$eventStreams',
+    '$logAnalyticsDestinations'
+)
+$countValidatedOptionalArrayAssignments = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -in $countValidatedOptionalArrayNames
+    }, $true)
+)
+Assert-True `
+    -Condition ($countValidatedOptionalArrayAssignments.Count -eq $countValidatedOptionalArrayNames.Count) `
+    -Case 'Verifier has all count-validated optional array assignments'
+foreach ($assignment in $countValidatedOptionalArrayAssignments) {
+    Assert-Contains `
+        -Source $assignment.Right.Extent.Text `
+        -Expected 'Where-Object { $null -ne $_ }' `
+        -Case "Verifier excludes nulls from $($assignment.Left.Extent.Text)"
+}
+$verifySourceAssignments = @(
+    $countValidatedOptionalArrayAssignments |
+        Where-Object { $_.Left.Extent.Text -in @('$windowsEventLogs', '$performanceCounters') }
+)
+$verifySourceCardinalityChecks = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains('$windowsEventLogs.Count -ne 1', [StringComparison]::Ordinal) -and
+        $node.Extent.Text.Contains('$performanceCounters.Count -ne 0', [StringComparison]::Ordinal)
+    }, $true)
+)
+Assert-True `
+    -Condition ($verifySourceAssignments.Count -eq 2 -and $verifySourceCardinalityChecks.Count -eq 1) `
+    -Case 'Verifier has one DCR source cardinality contract'
+$verifySourceContractStart = ($verifySourceAssignments | Sort-Object {
+        $_.Extent.StartOffset
+    } | Select-Object -First 1).Extent.StartOffset
+$verifySourceContractEnd = $verifySourceCardinalityChecks[0].Extent.EndOffset
+$verifySourceContract = [scriptblock]::Create(
+    "param([AllowNull()][object] `$dcrDataSources)`n" +
+    $verifySource.Substring(
+        $verifySourceContractStart,
+        $verifySourceContractEnd - $verifySourceContractStart
+    )
+)
+$windowsEventSource = [pscustomobject]@{ name = 'SyntheticWindowsEvents' }
+$validDcrDataSources = [pscustomobject]@{
+    windowsEventLogs = @($windowsEventSource)
+}
+$validDcrError = $null
+try {
+    & $verifySourceContract $validDcrDataSources
+} catch {
+    $validDcrError = $_.Exception.Message
+}
+Assert-True `
+    -Condition ($null -eq $validDcrError) `
+    -Case 'Verifier accepts an absent performanceCounters property'
+$performanceDcrError = $null
+try {
+    & $verifySourceContract ([pscustomobject]@{
+            windowsEventLogs = @($windowsEventSource)
+            performanceCounters = @([pscustomobject]@{ name = 'SyntheticPerformance' })
+        })
+} catch {
+    $performanceDcrError = $_.Exception.Message
+}
+Assert-True `
+    -Condition ($performanceDcrError -ceq 'The dedicated DCR must contain exactly one Windows event source and no duplicate performance-counter source.') `
+    -Case 'Verifier rejects an actual performanceCounters entry'
+$invalidWindowsEventLogCases = @(
+    [pscustomobject]@{
+        Name = 'missing'
+        Values = @()
+    }
+    [pscustomobject]@{
+        Name = 'multiple'
+        Values = @($windowsEventSource, $windowsEventSource)
+    }
+)
+foreach ($invalidWindowsEventLogCase in $invalidWindowsEventLogCases) {
+    $windowsEventDcrError = $null
+    try {
+        & $verifySourceContract ([pscustomobject]@{
+                windowsEventLogs = $invalidWindowsEventLogCase.Values
+            })
+    } catch {
+        $windowsEventDcrError = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition ($windowsEventDcrError -ceq 'The dedicated DCR must contain exactly one Windows event source and no duplicate performance-counter source.') `
+        -Case "Verifier rejects $($invalidWindowsEventLogCase.Name) windowsEventLogs entries"
+}
+$scheduledTaskEnabledFunctions = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Test-ArcIdentityScheduledTaskEnabled'
+    }, $true)
+)
+$scheduledTaskPropertyAssignments = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -ceq '$scheduledTaskProperties'
+    }, $true)
+)
+$scheduledTaskContractChecks = @(
+    $verifyContractAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains('$scheduledTaskMode -ne ''Review''', [StringComparison]::Ordinal) -and
+        $node.Extent.Text.Contains('$scheduledTaskCron -ne ''30 7 * * 1-5''', [StringComparison]::Ordinal) -and
+        $node.Extent.Text.Contains('-not $scheduledTaskEnabledStateIsValid', [StringComparison]::Ordinal)
+    }, $true)
+)
+Assert-True `
+    -Condition (
+        $scheduledTaskEnabledFunctions.Count -eq 1 -and
+        $scheduledTaskPropertyAssignments.Count -eq 1 -and
+        $scheduledTaskContractChecks.Count -eq 1
+    ) `
+    -Case 'Verifier has one normalized scheduled task contract'
+$scheduledTaskValidationContract = [scriptblock]::Create(
+    "param([AllowNull()][object] `$scheduledTask)`n" +
+    $scheduledTaskEnabledFunctions[0].Extent.Text +
+    "`n" +
+    $verifySource.Substring(
+        $scheduledTaskPropertyAssignments[0].Extent.StartOffset,
+        $scheduledTaskContractChecks[0].Extent.EndOffset -
+        $scheduledTaskPropertyAssignments[0].Extent.StartOffset
+    )
+)
+
+function New-ArcIdentityScheduledTaskProbeResponse {
+    param(
+        [hashtable] $Properties = @{},
+        [hashtable] $TopLevel = @{}
+    )
+
+    $taskProperties = [ordered]@{
+        agentMode = 'Review'
+        cronExpression = '30 7 * * 1-5'
+    }
+    foreach ($key in $Properties.Keys) {
+        $taskProperties[$key] = $Properties[$key]
+    }
+    $response = [ordered]@{
+        properties = [pscustomobject] $taskProperties
+    }
+    foreach ($key in $TopLevel.Keys) {
+        $response[$key] = $TopLevel[$key]
+    }
+    return [pscustomobject] $response
+}
+
+$scheduledTaskStateCases = @(
+    [pscustomobject]@{ Name = 'live Active status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active' }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'top-level Active status'; Task = New-ArcIdentityScheduledTaskProbeResponse -TopLevel @{ status = 'Active' }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'explicit true'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'aligned true and Active'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true; status = 'Active' }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'aligned nested and top-level state'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true; status = 'Active' } -TopLevel @{ isEnabled = $true; status = 'Active' }; ExpectedValid = $true }
+    [pscustomobject]@{ Name = 'explicit false'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $false }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'false conflicting with Active'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $false; status = 'Active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'true conflicting with Inactive'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true; status = 'Inactive' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'nested true conflicting with top-level false'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $true; status = 'Active' } -TopLevel @{ isEnabled = $false; status = 'Active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'nested Active conflicting with top-level Disabled'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active' } -TopLevel @{ status = 'Disabled' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'nested Active conflicting with wrong-case top-level status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active' } -TopLevel @{ status = 'active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'Inactive status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Inactive' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'Disabled status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Disabled' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'wrong-case active status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'explicit null'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = $null; status = 'Active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'non-boolean explicit value'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ isEnabled = 'true'; status = 'Active' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'explicit null status'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = $null }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'missing enabled state'; Task = New-ArcIdentityScheduledTaskProbeResponse; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'wrong cron'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active'; cronExpression = '0 7 * * 1-5' }; ExpectedValid = $false }
+    [pscustomobject]@{ Name = 'non-Review mode'; Task = New-ArcIdentityScheduledTaskProbeResponse -Properties @{ status = 'Active'; agentMode = 'Autonomous' }; ExpectedValid = $false }
+)
+foreach ($scheduledTaskStateCase in $scheduledTaskStateCases) {
+    $scheduledTaskValidationError = $null
+    try {
+        $null = & $scheduledTaskValidationContract $scheduledTaskStateCase.Task
+    } catch {
+        $scheduledTaskValidationError = $_.Exception.Message
+    }
+    if ($scheduledTaskStateCase.ExpectedValid) {
+        Assert-True `
+            -Condition ($null -eq $scheduledTaskValidationError) `
+            -Case "Verifier accepts scheduled task: $($scheduledTaskStateCase.Name)"
+    } else {
+        Assert-True `
+            -Condition (
+                $scheduledTaskValidationError -ceq
+                'The identity operational report must remain enabled, weekday-only, and Review mode.'
+            ) `
+            -Case "Verifier rejects scheduled task: $($scheduledTaskStateCase.Name)"
+    }
+}
 Assert-Contains -Source $verifySource -Expected '$autoMitigate = Get-ArcIdentityOptionalPropertyValue' -Case 'Verification tolerates absent autoMitigate'
 Assert-Contains -Source $verifySource -Expected '$null -ne $autoMitigate -and $autoMitigate -ne $true' -Case 'Verification rejects conflicting autoMitigate'
 Assert-NotMatches -Source $verifySource -Pattern '\$properties\.autoMitigate' -Case 'Verification does not require autoMitigate response'

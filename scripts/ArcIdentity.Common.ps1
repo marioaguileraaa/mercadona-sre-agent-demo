@@ -735,16 +735,83 @@ function Invoke-ArcIdentityLogAnalyticsQuery {
         [string] $Query
     )
 
-    return Invoke-ArcIdentityAzJson `
-        -Arguments @(
-            'monitor', 'log-analytics', 'query',
-            '--subscription', $SubscriptionId,
-            '--workspace', $WorkspaceCustomerId,
-            '--analytics-query', $Query,
-            '--timespan', 'P1D',
-            '--output', 'json'
-        ) `
-        -FailureMessage 'Unable to query the ArcBox Log Analytics workspace.'
+    $bodyJson = ConvertTo-Json -InputObject ([ordered]@{
+            query = $Query
+        }) -Compress
+    $bodyFile = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine(
+            [System.IO.Path]::GetTempPath(),
+            "arc-identity-log-query-$([Guid]::NewGuid().ToString('N')).json"
+        )
+    )
+    try {
+        [System.IO.File]::WriteAllText(
+            $bodyFile,
+            $bodyJson,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $bodyFileArgument = "@$bodyFile"
+        $response = Invoke-ArcIdentityAzJson `
+            -Arguments @(
+                'rest',
+                '--method', 'post',
+                '--subscription', $SubscriptionId,
+                '--url', "https://api.loganalytics.azure.com/v1/workspaces/$WorkspaceCustomerId/query",
+                '--resource', 'https://api.loganalytics.io',
+                '--headers', 'Content-Type=application/json',
+                '--body', $bodyFileArgument,
+                '--output', 'json'
+            ) `
+            -FailureMessage 'Unable to query the ArcBox Log Analytics workspace.'
+    } finally {
+        $bodyJson = $null
+        if (Test-Path -LiteralPath $bodyFile -PathType Leaf) {
+            Remove-Item -LiteralPath $bodyFile -Force
+        }
+    }
+
+    $tablesProperty = $response.PSObject.Properties['tables']
+    if ($null -eq $tablesProperty -or $null -eq $tablesProperty.Value) {
+        throw 'Log Analytics query response did not expose a tables collection.'
+    }
+    $queryRows = [System.Collections.Generic.List[object]]::new()
+    foreach ($table in @($tablesProperty.Value)) {
+        $columnsProperty = $table.PSObject.Properties['columns']
+        $rowsProperty = $table.PSObject.Properties['rows']
+        if ($null -eq $columnsProperty -or
+            $null -eq $columnsProperty.Value -or
+            $null -eq $rowsProperty -or
+            $null -eq $rowsProperty.Value) {
+            throw 'Log Analytics query response table did not expose columns and rows.'
+        }
+        $columnNames = @(
+            foreach ($column in @($columnsProperty.Value)) {
+                $columnName = [string] (
+                    Get-ArcIdentityOptionalPropertyValue -InputObject $column -PropertyName 'name'
+                )
+                if ([string]::IsNullOrWhiteSpace($columnName)) {
+                    throw 'Log Analytics query response contained an unnamed column.'
+                }
+                $columnName
+            }
+        )
+        foreach ($row in @($rowsProperty.Value)) {
+            $rowValues = @($row)
+            if ($rowValues.Count -ne $columnNames.Count) {
+                throw 'Log Analytics query response row did not match its column count.'
+            }
+            $rowProperties = [ordered]@{}
+            for ($index = 0; $index -lt $columnNames.Count; $index++) {
+                $columnName = $columnNames[$index]
+                if ($rowProperties.Contains($columnName)) {
+                    throw "Log Analytics query response contained duplicate column '$columnName'."
+                }
+                $rowProperties[$columnName] = $rowValues[$index]
+            }
+            $queryRows.Add([pscustomobject] $rowProperties)
+        }
+    }
+    return $queryRows.ToArray()
 }
 
 function Test-ArcIdentityRoleAssignment {
