@@ -1247,6 +1247,41 @@ $connectorMismatchCases = @(
         Name = 'Connector visible resource name mismatch rejected'
         Field = 'extendedProperties.resource.name'
         Mutate = { param($connector) $connector.properties.extendedProperties.resource.name = 'other-workspace' }
+    },
+    @{
+        Name = 'Connector array name rejected'
+        Field = 'name'
+        Mutate = { param($connector) $connector.name = [object[]] @($connector.name) }
+    },
+    @{
+        Name = 'Connector array type rejected'
+        Field = 'dataConnectorType'
+        Mutate = { param($connector) $connector.properties.dataConnectorType = [object[]] @('LogAnalytics') }
+    },
+    @{
+        Name = 'Connector array identity rejected'
+        Field = 'identity'
+        Mutate = { param($connector) $connector.properties.identity = [object[]] @($connector.properties.identity) }
+    },
+    @{
+        Name = 'Connector array source rejected'
+        Field = 'source'
+        Mutate = { param($connector) $connector.properties.source = [object[]] @('Agent') }
+    },
+    @{
+        Name = 'Connector array provisioning state rejected'
+        Field = 'provisioningState'
+        Mutate = { param($connector) $connector.properties.provisioningState = [object[]] @('Succeeded') }
+    },
+    @{
+        Name = 'Connector array deployment error rejected'
+        Field = 'deploymentError'
+        Mutate = { param($connector) $connector.properties.deploymentError = [object[]] @() }
+    },
+    @{
+        Name = 'Connector array data source rejected'
+        Field = 'dataSource'
+        Mutate = { param($connector) $connector.properties.dataSource = [object[]] @() }
     }
 )
 foreach ($mismatchCase in $connectorMismatchCases) {
@@ -1482,6 +1517,19 @@ Assert-True `
         -not $unicodeResponseDetails.Contains([string] ([char] 0xFFFD), [StringComparison]::Ordinal)
     ) `
     -Case 'Data-plane error cap is UTF-8 byte bounded'
+$reasonPhraseTail = 'REASON_PHRASE_TAIL_MUST_NOT_LEAK'
+$boundedReasonPhraseError = Format-ArcIdentitySreAgentApiError `
+    -StatusCode 400 `
+    -ReasonPhrase "$(('r' * 5000))$reasonPhraseTail" `
+    -ResponseBody 'synthetic validation detail'
+Assert-True `
+    -Condition (
+        $boundedReasonPhraseError.Contains('HTTP 400', [StringComparison]::Ordinal) -and
+        $boundedReasonPhraseError.Contains('synthetic validation detail', [StringComparison]::Ordinal) -and
+        -not $boundedReasonPhraseError.Contains($reasonPhraseTail, [StringComparison]::Ordinal) -and
+        [System.Text.Encoding]::UTF8.GetByteCount($boundedReasonPhraseError) -le 512
+    ) `
+    -Case 'Data-plane error reason phrase is bounded'
 
 Assert-True `
     -Condition (

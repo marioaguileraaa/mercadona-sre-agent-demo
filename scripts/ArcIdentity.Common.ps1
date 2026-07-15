@@ -23,6 +23,42 @@ function Get-ArcIdentityOptionalPropertyValue {
     return $property.Value
 }
 
+function Get-ArcIdentityPropertyState {
+    param(
+        [AllowNull()]
+        [object] $InputObject,
+        [Parameter(Mandatory)]
+        [string] $PropertyName
+    )
+
+    if ($null -eq $InputObject) {
+        return [pscustomobject] @{
+            Exists = $false
+            Value = $null
+        }
+    }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $exists = $InputObject.Contains($PropertyName)
+        $value = $null
+        if ($exists) {
+            $value = $InputObject[$PropertyName]
+        }
+        return [pscustomobject] @{
+            Exists = $exists
+            Value = $value
+        }
+    }
+    $property = $InputObject.PSObject.Properties[$PropertyName]
+    $value = $null
+    if ($null -ne $property) {
+        $value = $property.Value
+    }
+    return [pscustomobject] @{
+        Exists = $null -ne $property
+        Value = $value
+    }
+}
+
 function Get-ArcIdentityFirstPropertyValue {
     param(
         [AllowNull()]
@@ -136,26 +172,29 @@ function Assert-ArcIdentityLogAnalyticsConnector {
         [string] $ExpectedIdentity
     )
 
-    $properties = Get-ArcIdentityOptionalPropertyValue `
+    $mismatches = [System.Collections.Generic.List[string]]::new()
+    $propertiesState = Get-ArcIdentityPropertyState `
         -InputObject $Connector `
         -PropertyName 'properties'
-    $extendedProperties = Get-ArcIdentityOptionalPropertyValue `
-        -InputObject $properties `
-        -PropertyName 'extendedProperties'
-    $resource = Get-ArcIdentityOptionalPropertyValue `
-        -InputObject $extendedProperties `
-        -PropertyName 'resource'
-    $mismatches = [System.Collections.Generic.List[string]]::new()
+    $properties = $propertiesState.Value
+    if (-not $propertiesState.Exists -or
+        $null -eq $properties -or
+        ($properties -isnot [pscustomobject] -and
+            $properties -isnot [System.Collections.IDictionary])) {
+        $mismatches.Add('properties')
+        $properties = $null
+    }
 
-    $actualName = Get-ArcIdentityOptionalPropertyValue `
+    $actualNameState = Get-ArcIdentityPropertyState `
         -InputObject $Connector `
         -PropertyName 'name'
-    $actualLeafName = if ($actualName -is [string]) {
-        (([string] $actualName).TrimEnd('/') -split '/')[-1]
+    $actualLeafName = if ($actualNameState.Value -is [string]) {
+        (([string] $actualNameState.Value).TrimEnd('/') -split '/')[-1]
     } else {
         ''
     }
-    if ([string]::IsNullOrWhiteSpace($actualLeafName) -or
+    if (-not $actualNameState.Exists -or
+        [string]::IsNullOrWhiteSpace($actualLeafName) -or
         -not [string]::Equals(
             $actualLeafName,
             $ExpectedName,
@@ -164,89 +203,122 @@ function Assert-ArcIdentityLogAnalyticsConnector {
         $mismatches.Add('name')
     }
 
-    $dataConnectorType = Get-ArcIdentityOptionalPropertyValue `
+    $dataConnectorTypeState = Get-ArcIdentityPropertyState `
         -InputObject $properties `
         -PropertyName 'dataConnectorType'
-    if ($dataConnectorType -isnot [string] -or
-        [string] $dataConnectorType -cne 'LogAnalytics') {
+    if (-not $dataConnectorTypeState.Exists -or
+        $dataConnectorTypeState.Value -isnot [string] -or
+        [string] $dataConnectorTypeState.Value -cne 'LogAnalytics') {
         $mismatches.Add('dataConnectorType')
     }
 
-    $identity = Get-ArcIdentityOptionalPropertyValue `
+    $identityState = Get-ArcIdentityPropertyState `
         -InputObject $properties `
         -PropertyName 'identity'
-    if ($identity -isnot [string] -or
-        [string]::IsNullOrWhiteSpace([string] $identity) -or
+    if (-not $identityState.Exists -or
+        $identityState.Value -isnot [string] -or
+        [string]::IsNullOrWhiteSpace([string] $identityState.Value) -or
         -not [string]::Equals(
-            [string] $identity,
+            [string] $identityState.Value,
             $ExpectedIdentity,
             [StringComparison]::OrdinalIgnoreCase
         )) {
         $mismatches.Add('identity')
     }
 
-    $source = Get-ArcIdentityOptionalPropertyValue `
+    $sourceState = Get-ArcIdentityPropertyState `
         -InputObject $properties `
         -PropertyName 'source'
-    if ($null -ne $source -and
-        ($source -isnot [string] -or [string] $source -cne 'Agent')) {
+    if ($sourceState.Exists -and
+        $null -ne $sourceState.Value -and
+        ($sourceState.Value -isnot [string] -or
+            [string] $sourceState.Value -cne 'Agent')) {
         $mismatches.Add('source')
     }
 
-    $provisioningState = Get-ArcIdentityOptionalPropertyValue `
+    $provisioningStateState = Get-ArcIdentityPropertyState `
         -InputObject $properties `
         -PropertyName 'provisioningState'
-    if ($null -ne $provisioningState -and
-        ($provisioningState -isnot [string] -or
-            [string] $provisioningState -cne 'Succeeded')) {
+    if ($provisioningStateState.Exists -and
+        $null -ne $provisioningStateState.Value -and
+        ($provisioningStateState.Value -isnot [string] -or
+            [string] $provisioningStateState.Value -cne 'Succeeded')) {
         $mismatches.Add('provisioningState')
     }
 
-    $deploymentError = Get-ArcIdentityOptionalPropertyValue `
+    $deploymentErrorState = Get-ArcIdentityPropertyState `
         -InputObject $properties `
         -PropertyName 'deploymentError'
-    if ($null -ne $deploymentError -and
-        ($deploymentError -isnot [string] -or
-            [string] $deploymentError -cne '')) {
+    if ($deploymentErrorState.Exists -and
+        $null -ne $deploymentErrorState.Value -and
+        ($deploymentErrorState.Value -isnot [string] -or
+            [string] $deploymentErrorState.Value -cne '')) {
         $mismatches.Add('deploymentError')
     }
 
-    $dataSource = Get-ArcIdentityOptionalPropertyValue `
+    $dataSourceState = Get-ArcIdentityPropertyState `
         -InputObject $properties `
         -PropertyName 'dataSource'
-    if ($null -ne $dataSource -and
-        ($dataSource -isnot [string] -or
-            (-not [string]::IsNullOrWhiteSpace([string] $dataSource) -and
+    if ($dataSourceState.Exists -and
+        $null -ne $dataSourceState.Value -and
+        ($dataSourceState.Value -isnot [string] -or
+            (-not [string]::IsNullOrWhiteSpace([string] $dataSourceState.Value) -and
                 -not [string]::Equals(
-                    [string] $dataSource,
+                    [string] $dataSourceState.Value,
                     $ExpectedWorkspaceResourceId,
                     [StringComparison]::OrdinalIgnoreCase
                 )))) {
         $mismatches.Add('dataSource')
     }
 
-    $armResourceId = Get-ArcIdentityOptionalPropertyValue `
+    $extendedPropertiesState = Get-ArcIdentityPropertyState `
+        -InputObject $properties `
+        -PropertyName 'extendedProperties'
+    $extendedProperties = $extendedPropertiesState.Value
+    if ($extendedPropertiesState.Exists -and
+        $null -ne $extendedProperties -and
+        $extendedProperties -isnot [pscustomobject] -and
+        $extendedProperties -isnot [System.Collections.IDictionary]) {
+        $mismatches.Add('extendedProperties')
+        $extendedProperties = $null
+    }
+
+    $armResourceIdState = Get-ArcIdentityPropertyState `
         -InputObject $extendedProperties `
         -PropertyName 'armResourceId'
-    if ($null -ne $armResourceId -and
-        ($armResourceId -isnot [string] -or
-            (-not [string]::IsNullOrWhiteSpace([string] $armResourceId) -and
+    if ($armResourceIdState.Exists -and
+        $null -ne $armResourceIdState.Value -and
+        ($armResourceIdState.Value -isnot [string] -or
+            (-not [string]::IsNullOrWhiteSpace([string] $armResourceIdState.Value) -and
                 -not [string]::Equals(
-                    [string] $armResourceId,
+                    [string] $armResourceIdState.Value,
                     $ExpectedWorkspaceResourceId,
                     [StringComparison]::OrdinalIgnoreCase
                 )))) {
         $mismatches.Add('extendedProperties.armResourceId')
     }
 
-    $resourceName = Get-ArcIdentityOptionalPropertyValue `
+    $resourceState = Get-ArcIdentityPropertyState `
+        -InputObject $extendedProperties `
+        -PropertyName 'resource'
+    $resource = $resourceState.Value
+    if ($resourceState.Exists -and
+        $null -ne $resource -and
+        $resource -isnot [pscustomobject] -and
+        $resource -isnot [System.Collections.IDictionary]) {
+        $mismatches.Add('extendedProperties.resource')
+        $resource = $null
+    }
+
+    $resourceNameState = Get-ArcIdentityPropertyState `
         -InputObject $resource `
         -PropertyName 'name'
-    if ($null -ne $resourceName -and
-        ($resourceName -isnot [string] -or
-            (-not [string]::IsNullOrWhiteSpace([string] $resourceName) -and
+    if ($resourceNameState.Exists -and
+        $null -ne $resourceNameState.Value -and
+        ($resourceNameState.Value -isnot [string] -or
+            (-not [string]::IsNullOrWhiteSpace([string] $resourceNameState.Value) -and
                 -not [string]::Equals(
-                    [string] $resourceName,
+                    [string] $resourceNameState.Value,
                     $ExpectedWorkspaceName,
                     [StringComparison]::OrdinalIgnoreCase
                 )))) {
@@ -954,9 +1026,16 @@ function Format-ArcIdentitySreAgentApiError {
         [switch] $ResponseBodyReadFailed
     )
 
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
     $status = "HTTP $StatusCode"
-    if (-not [string]::IsNullOrWhiteSpace($ReasonPhrase)) {
-        $status += " ($($ReasonPhrase.Trim()))"
+    $normalizedReasonPhrase = if ($null -eq $ReasonPhrase) {
+        ''
+    } else {
+        $ReasonPhrase.Trim()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($normalizedReasonPhrase) -and
+        $utf8.GetByteCount($normalizedReasonPhrase) -le 128) {
+        $status += " ($normalizedReasonPhrase)"
     }
     $prefix = "Azure SRE Agent data-plane request failed with $status."
     if ($ResponseBodyReadFailed) {
@@ -967,7 +1046,6 @@ function Format-ArcIdentitySreAgentApiError {
     }
 
     $responseDetails = $ResponseBody.Trim()
-    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
     if ($utf8.GetByteCount($responseDetails) -gt $MaxResponseBodyBytes) {
         $characters = $responseDetails.ToCharArray()
         $bytes = [byte[]]::new($MaxResponseBodyBytes)
