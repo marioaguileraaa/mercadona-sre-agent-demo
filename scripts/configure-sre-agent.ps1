@@ -7,12 +7,14 @@ param(
     [string] $RepositoryUrl = 'https://github.com/marioaguileraaa/mercadona-sre-agent-demo',
     [string] $RepositoryName = 'mercadona-sre-agent-demo',
     [string] $GitHubRepository = 'marioaguileraaa/mercadona-sre-agent-demo',
+    [string] $ExpectedRepositoryCommit = '',
     [ValidateRange(500, 1000000)]
     [int] $MonthlyAgentUnitLimit = 1000,
     [switch] $SetGitHubSecret
 )
 
 . "$PSScriptRoot\AzureDemo.Common.ps1"
+. "$PSScriptRoot\SreAgent.GitHubPreflight.ps1"
 
 $sreAdministratorRoleId = 'e79298df-d852-4c6d-84f9-5d13249d1e55'
 $sreStandardUserRoleId = '2d84a65a-63b2-4343-bbb6-31105d857bc1'
@@ -27,6 +29,10 @@ $cartAlertName = 'alert-mercadona-cart-5xx-sev3'
 $cartAlertResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Insights/metricAlerts/$cartAlertName"
 $incidentHandlerName = 'incident-handler'
 $incidentFilterName = 'mercadona-cart-5xx-sev3'
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$expectedRepositoryCommit = Resolve-ExpectedRepositoryCommit `
+    -ExpectedRepositoryCommit $ExpectedRepositoryCommit `
+    -RepositoryRoot $repoRoot
 
 function ConvertFrom-Base64Url {
     param(
@@ -246,21 +252,6 @@ if (-not $hasAdministratorRole) {
     Write-Host 'Granted the signed-in user SRE Agent Administrator at agent scope.'
 } else {
     Write-Host 'Signed-in user already has SRE Agent Administrator at agent scope.'
-}
-
-$limitPatch = @{
-    properties = @{
-        monthlyAgentUnitLimit = $MonthlyAgentUnitLimit
-    }
-} | ConvertTo-Json -Depth 4 -Compress
-az rest `
-    --method patch `
-    --url "${agentArmUrl}?api-version=$previewApiVersion" `
-    --headers 'Content-Type=application/json' `
-    --body $limitPatch `
-    --output none
-if ($LASTEXITCODE -ne 0) {
-    throw 'Unable to configure monthlyAgentUnitLimit through the control plane.'
 }
 
 $agent = az rest `
@@ -548,38 +539,7 @@ if ($null -ne $lastDataPlaneError) {
 }
 
 $domainsResponse = Invoke-AgentApi -Method Get -Path '/api/v2/github/domains' -Body $null
-$domains = Get-ResponseItems -Response $domainsResponse -PropertyNames @('value', 'values', 'domains', 'items')
-$githubDomain = $domains | Where-Object {
-    $domainProperties = Get-OptionalPropertyValue -InputObject $_ -PropertyName 'properties'
-    $domainName = @(
-        Get-OptionalPropertyValue -InputObject $_ -PropertyName 'name'
-        Get-OptionalPropertyValue -InputObject $_ -PropertyName 'domain'
-        Get-OptionalPropertyValue -InputObject $domainProperties -PropertyName 'domain'
-    ) | Where-Object { $null -ne $_ } | Select-Object -First 1
-    $domainName -in @('github_com', 'github.com')
-} | Select-Object -First 1
-$githubDomainProperties = Get-OptionalPropertyValue -InputObject $githubDomain -PropertyName 'properties'
-$githubDomainStatus = @(
-    Get-OptionalPropertyValue -InputObject $githubDomainProperties -PropertyName 'status'
-    Get-OptionalPropertyValue -InputObject $githubDomainProperties -PropertyName 'connectionStatus'
-    Get-OptionalPropertyValue -InputObject $githubDomain -PropertyName 'status'
-    Get-OptionalPropertyValue -InputObject $githubDomain -PropertyName 'connectionStatus'
-) | Where-Object { $null -ne $_ } | Select-Object -First 1
-$githubDomainIsHealthy = Get-OptionalPropertyValue -InputObject $githubDomain -PropertyName 'isHealthy'
-$domainReady = if ($null -ne $githubDomainIsHealthy) {
-    $githubDomainIsHealthy -eq $true
-} else {
-    # Current domain records can omit status; the platform treats a host record as authenticated.
-    $null -ne $githubDomain -and
-        ($githubDomainStatus -in @('Connected', 'Ready', 'Authenticated', 'Succeeded') -or
-         [string]::IsNullOrWhiteSpace([string]$githubDomainStatus))
-}
-if (-not $domainReady) {
-    Invoke-AgentApi -Method Get -Path '/api/v2/github/oauth/config' -Body $null | Out-Null
-    Write-Host 'INCOMPLETE: GitHub OAuth authorization is required before source indexing or issue/PR actions.'
-    Write-Host 'Manual step: Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > Sign in, then rerun this script.'
-    throw 'INCOMPLETE: no authenticated github_com domain was available.'
-}
+$availableTools = Invoke-AgentApi -Method Get -Path '/api/v2/agent/tools' -Body $null
 
 $repositoryBody = @{
     name = $RepositoryName
@@ -605,89 +565,48 @@ $existingRepository = $repositories | Where-Object {
 if ($null -ne $existingRepository) {
     $existingRepository = Invoke-AgentApi -Method Get -Path "/api/v2/repos/$RepositoryName" -Body $null
 }
-$existingRepositoryProperties = Get-OptionalPropertyValue -InputObject $existingRepository -PropertyName 'properties'
-$existingRepositoryUrl = @(
-    Get-OptionalPropertyValue -InputObject $existingRepositoryProperties -PropertyName 'url'
-    Get-OptionalPropertyValue -InputObject $existingRepository -PropertyName 'url'
-) | Where-Object { $null -ne $_ } | Select-Object -First 1
-$existingRepositoryBranch = @(
-    Get-OptionalPropertyValue -InputObject $existingRepositoryProperties -PropertyName 'branch'
-    Get-OptionalPropertyValue -InputObject $existingRepository -PropertyName 'branch'
-) | Where-Object { $null -ne $_ } | Select-Object -First 1
-$existingRepositoryType = @(
-    Get-OptionalPropertyValue -InputObject $existingRepositoryProperties -PropertyName 'type'
-    Get-OptionalPropertyValue -InputObject $existingRepository -PropertyName 'type'
-) | Where-Object { $null -ne $_ } | Select-Object -First 1
-$existingCloneStatus = @(
-    Get-OptionalPropertyValue -InputObject $existingRepositoryProperties -PropertyName 'cloneStatus'
-    Get-OptionalPropertyValue -InputObject $existingRepository -PropertyName 'cloneStatus'
-) | Where-Object { $null -ne $_ } | Select-Object -First 1
-$existingRepositoryBranchMatchesDesired = [string]::IsNullOrWhiteSpace($existingRepositoryBranch) `
-    -or $existingRepositoryBranch -eq 'main'
-$repositorySourceMatchesDesired = $null -ne $existingRepository `
-    -and $existingRepositoryUrl -eq $RepositoryUrl `
-    -and $existingRepositoryBranchMatchesDesired `
-    -and $existingRepositoryType -eq 'GitHub'
-
-if ($null -eq $existingRepository) {
-    Invoke-AgentApi -Method Put -Path "/api/v2/repos/$RepositoryName" -Body $repositoryBody | Out-Null
-    Write-Host "Created repository '$RepositoryName'."
-} elseif (-not $repositorySourceMatchesDesired) {
-    throw "Repository '$RepositoryName' already exists with a different URL, type, or branch. Refusing destructive replacement."
-} elseif ($existingCloneStatus -eq 'Ready') {
-    Write-Host "Reusing existing Ready repository '$RepositoryName'."
+$readRepository = {
+    Invoke-AgentApi -Method Get -Path "/api/v2/repos/$RepositoryName" -Body $null
+}
+$createRepository = if ($null -eq $existingRepository) {
+    {
+        Invoke-AgentApi `
+            -Method Put `
+            -Path "/api/v2/repos/$RepositoryName" `
+            -Body $repositoryBody | Out-Null
+        Write-Host "Created repository '$RepositoryName'."
+    }
 } else {
-    Write-Host "Repository '$RepositoryName' already has the desired source configuration; waiting for cloneStatus '$existingCloneStatus' to complete."
+    $null
 }
+$githubRepositoryPreflight = Invoke-SreGithubRepositoryPreflight `
+    -DomainsResponse $domainsResponse `
+    -ToolsResponse $availableTools `
+    -InitialRepository $existingRepository `
+    -ReadRepository $readRepository `
+    -CreateRepository $createRepository `
+    -RequestSynchronization $null `
+    -RepositoryName $RepositoryName `
+    -RepositoryUrl $RepositoryUrl `
+    -RepositoryBranch 'main' `
+    -ExpectedCommit $expectedRepositoryCommit
+$selectedGitHubTools = @($githubRepositoryPreflight.SelectedTools)
+$repositoryState = $githubRepositoryPreflight.Repository
+Write-Host "CodeRepo '$RepositoryName' is Ready at exact origin/main commit '$($repositoryState.Commit)'."
 
-$repoDeadline = (Get-Date).AddMinutes(10)
-$cloneStatus = $null
-do {
-    $repoStatus = Invoke-AgentApi -Method Get -Path "/api/v2/repos/$RepositoryName" -Body $null
-    $repoStatusProperties = Get-OptionalPropertyValue -InputObject $repoStatus -PropertyName 'properties'
-    $cloneStatus = @(
-        Get-OptionalPropertyValue -InputObject $repoStatusProperties -PropertyName 'cloneStatus'
-        Get-OptionalPropertyValue -InputObject $repoStatus -PropertyName 'cloneStatus'
-    ) | Where-Object { $null -ne $_ } | Select-Object -First 1
-    if ($cloneStatus -eq 'Ready') {
-        break
+$limitPatch = @{
+    properties = @{
+        monthlyAgentUnitLimit = $MonthlyAgentUnitLimit
     }
-    if ($cloneStatus -in @('Failed', 'Error', 'Canceled')) {
-        throw "Repository indexing failed with cloneStatus '$cloneStatus'."
-    }
-    Start-Sleep -Seconds 10
-} while ((Get-Date) -lt $repoDeadline)
-if ($cloneStatus -ne 'Ready') {
-    throw "Repository cloneStatus did not reach Ready within ten minutes. Last status: '$cloneStatus'."
-}
-
-$availableTools = Invoke-AgentApi -Method Get -Path '/api/v2/agent/tools' -Body $null
-$availableToolsJson = $availableTools | ConvertTo-Json -Depth 30 -Compress
-$availableToolNames = @([regex]::Matches(
-        $availableToolsJson,
-        '"(?:name|toolName)"\s*:\s*"([^"]+)"',
-        [Text.RegularExpressions.RegexOptions]::IgnoreCase
-    ) | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
-$requiredGitHubCapabilities = [ordered]@{
-    issue = '(?i)^(issue_write|CreateGithubIssue)$'
-    branch = '(?i)^(create_branch|CreateGithubBranch|CreateBranch)$'
-    contents = '(?i)^(push_files|PushGithubFiles|CommitGithubFiles|CreateGithubCommit|PushFiles)$'
-    pullRequest = '(?i)^(create_pull_request|CreateGithubPullRequest|CreatePullRequest)$'
-}
-$selectedGitHubTools = [System.Collections.Generic.List[string]]::new()
-$missingGitHubCapabilities = [System.Collections.Generic.List[string]]::new()
-foreach ($capability in $requiredGitHubCapabilities.GetEnumerator()) {
-    $matchingTool = $availableToolNames | Where-Object { $_ -match $capability.Value } | Select-Object -First 1
-    if ([string]::IsNullOrWhiteSpace($matchingTool)) {
-        $missingGitHubCapabilities.Add($capability.Key)
-    } else {
-        $selectedGitHubTools.Add($matchingTool)
-    }
-}
-if ($missingGitHubCapabilities.Count -gt 0) {
-    Write-Host 'INCOMPLETE: the authenticated GitHub connection did not expose every required issue/branch/contents/pull-request capability.'
-    Write-Host 'Manual step: Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > reconnect with issue, contents and pull-request write access, then rerun this script.'
-    throw "INCOMPLETE: missing GitHub capabilities: $($missingGitHubCapabilities -join ', ')."
+} | ConvertTo-Json -Depth 4 -Compress
+az rest `
+    --method patch `
+    --url "${agentArmUrl}?api-version=$previewApiVersion" `
+    --headers 'Content-Type=application/json' `
+    --body $limitPatch `
+    --output none
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to configure monthlyAgentUnitLimit through the control plane.'
 }
 
 foreach ($connectorName in @('log-analytics', 'application-insights')) {
@@ -762,7 +681,7 @@ First search memory, then correlate Azure Monitor Requests 5xx, Application Insi
 
 Remain in Review mode. The only immediate mitigation you may propose is a controlled clean revision with DEMO_CART_MEMORY_MB_PER_ADD=0, DEMO_CART_MEMORY_FAILURE_MB=0 and DEMO_CART_MEMORY_MAX_MB=640. Explain that the new revision restarts the process and releases the retained heap. Never execute this write until the operator explicitly approves it. After approval, verify the healthy cart-to-tracking flow and that no new 5xx is produced.
 
-Only after that approval, create a GitHub issue with Summary, Impact, Timeline, Evidence, Root Cause, Immediate Mitigation, Permanent Fix and Validation. Then create a branch, apply the smallest permanent code fix with tests, push the commit and open a pull request linked to the issue. Use only the authenticated GitHub connector operations (issue_write, create_branch, push_files and create_pull_request). Never use a token, gh CLI or direct GitHub REST call. Never merge a pull request, dispatch a workflow, deploy a revision from the PR or close the issue automatically. If any GitHub capability is unavailable, report INCOMPLETE with the minimal connector step and do not claim success.
+Only after that approval, create a GitHub issue with Summary, Impact, Timeline, Evidence, Root Cause, Immediate Mitigation, Permanent Fix and Validation. Then create a branch, apply the smallest permanent code fix with tests, push the commit and open a pull request linked to the issue. Use only the exact authenticated GitHub write tools attached to this handler. Never use a token, gh CLI or direct GitHub REST call. Never merge a pull request, dispatch a workflow, deploy a revision from the PR or close the issue automatically. If any GitHub capability is unavailable, report INCOMPLETE with the minimal connector step and do not claim success.
 '@
         handoffDescription = 'Investigate the synthetic retail cart 5xx incident, propose the reviewed clean-revision mitigation, and prepare an issue and unmerged PR after approval.'
         handoffs = @()
@@ -877,7 +796,6 @@ if ([string]::IsNullOrWhiteSpace($triggerUrl)) {
     $triggerUrl = "$endpoint/api/v1/httptriggers/trigger/$triggerId"
 }
 
-$repoRoot = Split-Path $PSScriptRoot -Parent
 $triggerBridgeTemplate = Join-Path $repoRoot 'infra\trigger-bridge.bicep'
 if (-not (Test-Path -LiteralPath $triggerBridgeTemplate -PathType Leaf)) {
     throw 'The Logic App trigger bridge Bicep module was not found.'
@@ -1000,14 +918,15 @@ if ([int]$verifiedAgent.properties.monthlyAgentUnitLimit -ne $MonthlyAgentUnitLi
 }
 
 $verifiedRepo = Invoke-AgentApi -Method Get -Path "/api/v2/repos/$RepositoryName" -Body $null
-$verifiedRepoProperties = Get-OptionalPropertyValue -InputObject $verifiedRepo -PropertyName 'properties'
-$verifiedCloneStatus = @(
-    Get-OptionalPropertyValue -InputObject $verifiedRepoProperties -PropertyName 'cloneStatus'
-    Get-OptionalPropertyValue -InputObject $verifiedRepo -PropertyName 'cloneStatus'
-) | Where-Object { $null -ne $_ } | Select-Object -First 1
-if ($verifiedCloneStatus -ne 'Ready') {
-    throw 'Repository is not Ready after configuration.'
-}
+$null = Wait-SreRepositoryReadyAtCommit `
+    -InitialRepository $verifiedRepo `
+    -ReadRepository $readRepository `
+    -CreateRepository $null `
+    -RequestSynchronization $null `
+    -RepositoryName $RepositoryName `
+    -RepositoryUrl $RepositoryUrl `
+    -RepositoryBranch 'main' `
+    -ExpectedCommit $expectedRepositoryCommit
 $verifiedSubagent = Invoke-AgentApi -Method Get -Path "/api/v2/extendedAgent/agents/$incidentHandlerName" -Body $null
 $verifiedFilter = Invoke-AgentApi -Method Get -Path "/api/v2/extendedAgent/incidentFilters/$incidentFilterName" -Body $null
 $verifiedTriggersResponse = Invoke-AgentApi -Method Get -Path '/api/v1/httptriggers' -Body $null
@@ -1046,4 +965,4 @@ if ($verifiedTriggerBridgePrincipalId -ne $triggerBridgePrincipalId -or $verifie
     throw 'Final Logic App trigger bridge identity or state verification failed.'
 }
 
-Write-Host "SRE Agent configuration verified: repo=Ready, GitHub=OAuth/domain+issue/branch/contents/PR, handler=incident-handler, responsePlan=$incidentFilterName, bridge=MSI/StandardUser, incident=AzMonitor, mode=Review, access=Low, monthlyLimit=$MonthlyAgentUnitLimit."
+Write-Host "SRE Agent configuration verified: repo=Ready@$expectedRepositoryCommit, GitHub=OAuth/domain+issue-create/update+branch+contents+PR-create, handler=incident-handler, responsePlan=$incidentFilterName, bridge=MSI/StandardUser, incident=AzMonitor, mode=Review, access=Low, monthlyLimit=$MonthlyAgentUnitLimit."

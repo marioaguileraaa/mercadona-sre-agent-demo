@@ -13,12 +13,14 @@ Muestra el flujo Stores -> Products -> Shopping Cart -> Checkout -> Order/Tracki
 Ejecuta:
 
 ```powershell
-.\scripts\verify-sre-agent.ps1
+git fetch origin main
+$expectedCommit = (git rev-parse origin/main).Trim()
+.\scripts\verify-sre-agent.ps1 -ExpectedRepositoryCommit $expectedCommit
 ```
 
-Di: “El agente está en Review/Low. El response plan solo coincide con la alerta Sev3 5xx y el backend exactos. CodeRepo y GitHub issue/PR están listos; merge, workflows y deploy están denegados.”
+Di: “El agente está en Review/Low. El response plan solo coincide con la alerta Sev3 5xx y el backend exactos. CodeRepo está Ready en el SHA completo de origin/main y GitHub expone issue create/update, branch, contents/push y pull-request create; merge, workflows y deploy están denegados.”
 
-Si aparece `INCOMPLETE`, detén la demo. Completa únicamente el OAuth indicado y repite.
+Si aparece `INCOMPLETE`, detén la demo. Para permisos, usa **Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests**. Para un SHA stale, usa **Builder > Knowledge base > Add repository**, reemplaza manualmente la fila stale y espera `Ready`. Después repite configure/verify con el mismo SHA; nunca copies tokens.
 
 ## Incidente
 

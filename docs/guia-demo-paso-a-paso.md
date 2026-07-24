@@ -37,17 +37,20 @@ sequenceDiagram
 ## 3. Despliegue y configuración
 
 ```powershell
+git fetch origin main
+$expectedCommit = (git rev-parse origin/main).Trim()
 .\scripts\deploy.ps1
-.\scripts\configure-sre-agent.ps1 -SetGitHubSecret
+.\scripts\configure-sre-agent.ps1 -ExpectedRepositoryCommit $expectedCommit -SetGitHubSecret
+.\scripts\verify-sre-agent.ps1 -ExpectedRepositoryCommit $expectedCommit
 ```
 
-La primera configuración puede detenerse con `INCOMPLETE`. En ese caso realiza solo **Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > Sign in**, habilita issue/contents/pull-request writes y vuelve a ejecutar. No copies tokens.
+La configuración valida antes de mutar filtros o subagentes: OAuth `github.com` healthy; writes exactos de issue create/update, branch, contents/push y pull request create; y CodeRepo con URL/tipo/branch correctos, `Ready` y el SHA completo esperado. La API usa primero `lastCommitHash`, con compatibilidad `commitId`/`commitHash` y respuestas wrapped/flat. Un SHA ausente, abreviado o stale detiene la demo.
 
-Resultado esperado: `sre-agent-mercadona-v1` en Review/Low; LAW, App Insights, conector GitHub autenticado (dominio en la API actual) y CodeRepo Ready; herramientas GitHub issue/branch/contents/PR; `incident-handler`; response plan `mercadona-cart-5xx-sev3` por alertId/título/recurso; quickstart competidor ausente; puente MSI seguro.
+Si OAuth o los writes están incompletos, realiza exactamente **Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests** y repite ambos comandos con el mismo `$expectedCommit`. No copies tokens.
 
-```powershell
-.\scripts\verify-sre-agent.ps1
-```
+No hay un endpoint soportado/documentado para resincronizar CodeRepo. Si está `Ready` en un SHA stale, realiza **Azure SRE Agent portal > Builder > Knowledge base > Add repository > elimina la fila stale, confirma y vuelve a añadir el mismo repositorio**, espera `Ready` y repite configure/verify. Los scripts no borran ni recrean silenciosamente un repositorio existente.
+
+Resultado esperado: `sre-agent-mercadona-v1` en Review/Low; LAW, App Insights, conector GitHub healthy y CodeRepo `Ready` en `$expectedCommit`; herramientas GitHub issue-create/update/branch/contents/PR-create; `incident-handler`; response plan `mercadona-cart-5xx-sev3` por alertId/título/recurso; quickstart competidor ausente; puente MSI seguro.
 
 ## 4. Línea base e incidente
 
