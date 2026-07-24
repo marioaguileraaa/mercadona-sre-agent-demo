@@ -82,10 +82,15 @@ az account set --subscription 5305e853-a63b-4b82-9a3f-6fde18c1a798
 Configure the independent agent only after infrastructure succeeds:
 
 ```powershell
-.\scripts\configure-sre-agent.ps1 -SetGitHubSecret
+git fetch origin main
+$expectedCommit = (git rev-parse origin/main).Trim()
+.\scripts\configure-sre-agent.ps1 -ExpectedRepositoryCommit $expectedCommit -SetGitHubSecret
+.\scripts\verify-sre-agent.ps1 -ExpectedRepositoryCommit $expectedCommit
 ```
 
-The script preserves strict, idempotent configuration: Review/Low, Anthropic/Automatic, AzMonitor, 1000 monthly units, Preview upgrades, SRE UAMI action identity, Log Analytics and App Insights connectors, non-destructive repository reuse, and no redirects. The current data-plane API stores GitHub connector authentication as a host domain; the script requires that domain plus CodeRepo `Ready`, selects the catalog's exact issue/branch/commit/PR tools, and fails as `INCOMPLETE` if OAuth needs the one-time manual step **Builder > Connectors > GitHub OAuth > Sign in**. It never prints tokens.
+The script preserves strict, idempotent configuration: Review/Low, Anthropic/Automatic, AzMonitor, 1000 monthly units, Preview upgrades, SRE UAMI action identity, Log Analytics and App Insights connectors, non-destructive repository reuse, and no redirects. Before any Agent API configuration write, it requires a healthy `github.com` OAuth domain; exact issue-create/update, branch-create, contents-push and pull-request-create tools; and CodeRepo URL/type/`main` plus `Ready` at the full expected commit. Repository responses use `lastCommitHash` as the primary data-plane field and accept observed compatibility fields `commitId` or `commitHash`, in wrapped or flat responses. Abbreviated or missing SHAs fail.
+
+If OAuth or write tools are incomplete, perform exactly **Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests**, then rerun both commands above. Never paste or print a token. No supported repository resynchronization endpoint is documented. If the repository is `Ready` at a stale SHA, use **Azure SRE Agent portal > Builder > Knowledge base > Add repository > remove the stale row, confirm, then add the same repository again**, wait for `Ready`, and rerun configure and verify. The scripts never silently delete or recreate an existing repository.
 
 The `incident-handler` and `mercadona-cart-5xx-sev3` response plan correlate 5xx telemetry, retained-byte logs, active revision, and repository evidence. The plan is limited by exact alert ID, title, Sev3 and backend resource, and known quickstart plans are removed without touching Arc filters. Global tool policy asks before Azure/GitHub writes and denies merge, workflow and deploy tools.
 
@@ -197,6 +202,7 @@ az bicep lint --file .\infra\trigger-bridge.bicep
 az bicep build --file .\infra\arc-identity.bicep
 az bicep lint --file .\infra\arc-identity.bicep
 pwsh -NoProfile -File .\scripts\test-configure-sre-agent-contract.ps1
+pwsh -NoProfile -File .\scripts\test-sre-agent-github-preflight-contract.ps1
 pwsh -NoProfile -File .\scripts\test-azure-demo-common-contract.ps1
 pwsh -NoProfile -File .\scripts\test-retail-incident-contract.ps1
 pwsh -NoProfile -File .\scripts\test-arc-identity-contract.ps1
@@ -224,4 +230,5 @@ Reset checklist:
 | Metric is delayed | Wait for platform ingestion; use manual `SYNTH-` workflow only for the demo, then recover |
 | Alert does not fire | Confirm six real 5xx responses, one backend replica, exact alert enabled, and `Requests` filtered to `statusCodeCategory=5xx` |
 | Workflow lacks `202` | Check the Logic App state and exact agent-scope Standard User assignment; never expose the protected trigger |
-| Repository or GitHub capabilities are incomplete | Complete **Builder > Connectors > GitHub OAuth** authentication, enable issue/contents/PR writes, then rerun configuration |
+| GitHub OAuth is healthy but write tools are incomplete | Use **Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests**, then rerun configure and verify with the same full expected SHA |
+| CodeRepo is Ready at a stale or missing SHA | No supported sync endpoint is documented; use **Builder > Knowledge base > Add repository**, manually replace the stale row, wait for `Ready`, then rerun configure and verify |
