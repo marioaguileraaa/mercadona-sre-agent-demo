@@ -172,7 +172,7 @@ $nestedTrigger = ConvertFrom-TestJson -Json @'
     "name": "mercadona-controlled-issue",
     "triggerId": "nested-trigger-id",
     "agentMode": "Review",
-    "agent": "code-analyzer",
+    "agent": "incident-handler",
     "agentPrompt": "Nested prompt"
   }
 }
@@ -191,7 +191,7 @@ Assert-Equal `
     -Case 'Nested trigger mode'
 Assert-Equal `
     -Actual (Get-FirstOptionalPropertyValue -InputObject $nestedTrigger -PropertyNames @('agent')) `
-    -Expected 'code-analyzer' `
+    -Expected 'incident-handler' `
     -Case 'Nested trigger agent'
 Assert-Equal `
     -Actual (Get-FirstOptionalPropertyValue -InputObject $nestedTrigger -PropertyNames @('agentPrompt')) `
@@ -317,17 +317,48 @@ foreach ($requiredContract in @(
         'sre-agent-mercadona-v1',
         'mercadona-controlled-issue',
         'logic-mercadona-sre-trigger-v1',
-        'mercadona-cart-memory-sev2',
+        'mercadona-cart-5xx-sev3',
+        'alert-mercadona-cart-5xx-sev3',
+        'incident-handler',
+        '/api/v2/github/domains',
+        '/api/v2/agent/tools',
+        'issue_write',
+        'create_branch',
+        'push_files',
+        'create_pull_request',
+        'QueryAppInsightsByResourceId',
+        'titleContains',
+        'azMonitorFilterSettings',
+        'targetResource',
         'DEMO_CART_MEMORY_MB_PER_ADD',
-        'WorkingSetBytes',
+        'DEMO_CART_MEMORY_FAILURE_MB',
+        'Requests 5xx',
         'RetainedBytes',
-        'code-analyzer',
+        'Never merge',
         'monthlyAgentUnitLimit',
         'Bearer $accessToken'
     )) {
     if (-not $source.Contains($requiredContract, [StringComparison]::Ordinal)) {
         throw "Required Mercadona contract was not preserved: '$requiredContract'"
     }
+}
+if ($source.Contains('/api/v2/extendedAgent/connectors/github', [StringComparison]::Ordinal)) {
+    throw 'The deprecated GitHubOAuth connector API must not be used.'
+}
+if (-not $source.Contains('Authorization = "Bearer $accessToken"', [StringComparison]::Ordinal)) {
+    throw 'SRE Agent configuration does not use the acquired bearer token.'
+}
+if ($source.Contains('Authorization = "******"', [StringComparison]::Ordinal)) {
+    throw 'SRE Agent configuration uses a masked placeholder instead of the acquired bearer token.'
+}
+if ($source -notmatch "priorities\s*=\s*@\('Sev3'\)" -or
+    $source -notmatch "agentMode\s*=\s*'Review'" -or
+    $source -notmatch 'mergeEnabled\s*=\s*\$false') {
+    throw 'Sev3 Review response-plan guardrails were not found.'
+}
+if ($source -notmatch "quickstart_response_plan" -or
+    $source -notmatch "quickstart_handler") {
+    throw 'Known competing quickstart response plans are not removed explicitly.'
 }
 
 Write-Host 'configure-sre-agent strict-mode response contract passed.'

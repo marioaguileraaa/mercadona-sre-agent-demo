@@ -13,9 +13,10 @@ public sealed class CartMemoryRetentionTests
     {
         var service = CreateService(0, 640);
 
-        var allocated = Retain(service, 1);
+        var result = Retain(service, 1);
 
-        Assert.Equal(0, allocated);
+        Assert.Equal(0, result.AllocationBytes);
+        Assert.False(result.IsCapacityExhausted);
         Assert.Equal(0, service.RetainedBytes);
     }
 
@@ -24,10 +25,10 @@ public sealed class CartMemoryRetentionTests
     {
         var service = CreateService(10, 640);
 
-        var allocated = Retain(service, 1);
+        var result = Retain(service, 1);
 
-        Assert.Equal(10L * 1024 * 1024, allocated);
-        Assert.Equal(allocated, service.RetainedBytes);
+        Assert.Equal(10L * 1024 * 1024, result.AllocationBytes);
+        Assert.Equal(result.AllocationBytes, service.RetainedBytes);
     }
 
     [Fact]
@@ -42,10 +43,25 @@ public sealed class CartMemoryRetentionTests
     {
         var service = CreateService(10, 20);
 
-        Assert.Equal(10L * 1024 * 1024, Retain(service, 1));
-        Assert.Equal(10L * 1024 * 1024, Retain(service, 2));
-        Assert.Equal(0, Retain(service, 3));
+        Assert.Equal(10L * 1024 * 1024, Retain(service, 1).AllocationBytes);
+        Assert.Equal(10L * 1024 * 1024, Retain(service, 2).AllocationBytes);
+        Assert.Equal(0, Retain(service, 3).AllocationBytes);
         Assert.Equal(20L * 1024 * 1024, service.RetainedBytes);
+    }
+
+    [Fact]
+    public void FailureThresholdRejectsWithoutAdditionalAllocation()
+    {
+        var service = CreateService(10, 40, 20);
+
+        Assert.False(Retain(service, 1).IsCapacityExhausted);
+        Assert.False(Retain(service, 2).IsCapacityExhausted);
+        var failed = Retain(service, 3);
+
+        Assert.True(failed.IsCapacityExhausted);
+        Assert.Equal(0, failed.AllocationBytes);
+        Assert.Equal(20L * 1024 * 1024, failed.RetainedBytes);
+        Assert.Equal(failed.RetainedBytes, service.RetainedBytes);
     }
 
     [Fact]
@@ -58,15 +74,16 @@ public sealed class CartMemoryRetentionTests
         Assert.Equal(40L * 1024 * 1024, service.RetainedBytes);
     }
 
-    private static CartMemoryRetentionService CreateService(int perAddMb, int maxMb) =>
+    private static CartMemoryRetentionService CreateService(int perAddMb, int maxMb, int failureMb = 0) =>
         new(
             Microsoft.Extensions.Options.Options.Create(new CartMemoryRetentionOptions
             {
                 MegabytesPerValidAdd = perAddMb,
-                MaxRetainedMegabytes = maxMb
+                MaxRetainedMegabytes = maxMb,
+                FailureThresholdMegabytes = failureMb
             }),
             NullLogger<CartMemoryRetentionService>.Instance);
 
-    private static long Retain(CartMemoryRetentionService service, int index) =>
+    private static MemoryRetentionResult Retain(CartMemoryRetentionService service, int index) =>
         service.RetainAfterValidAdd($"CORR-{index}", "CART-TEST", "store-river", "product-apples", 1);
 }

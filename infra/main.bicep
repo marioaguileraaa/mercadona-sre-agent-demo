@@ -129,6 +129,14 @@ module backend 'core/host/container-app.bicep' = {
         name: 'DEMO_CART_MEMORY_MAX_MB'
         value: '640'
       }
+      {
+        name: 'DEMO_CART_MEMORY_FAILURE_MB'
+        value: '0'
+      }
+      {
+        name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+        value: observability.outputs.applicationInsightsConnectionString
+      }
     ]
   }
   dependsOn: [
@@ -178,13 +186,13 @@ resource backendResource 'Microsoft.App/containerApps@2024-03-01' existing = {
   name: backendName
 }
 
-resource cartMemoryAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
-  name: 'alert-mercadona-cart-memory'
+resource cartRequests5xxAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'alert-mercadona-cart-5xx-sev3'
   location: 'global'
   tags: tags
   properties: {
-    description: 'Synthetic retail backend working set exceeded 600 MiB in the controlled cart-memory demo.'
-    severity: 2
+    description: 'Synthetic retail cart API returned more than five 5xx responses in five minutes.'
+    severity: 3
     enabled: true
     scopes: [
       backendResource.id
@@ -197,13 +205,22 @@ resource cartMemoryAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
       'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
       allOf: [
         {
-          name: 'CartMemoryWorkingSet'
+          name: 'CartRequests5xx'
           metricNamespace: 'Microsoft.App/containerApps'
-          metricName: 'WorkingSetBytes'
+          metricName: 'Requests'
           operator: 'GreaterThan'
-          threshold: 629145600
-          timeAggregation: 'Maximum'
+          threshold: 5
+          timeAggregation: 'Total'
           criterionType: 'StaticThresholdCriterion'
+          dimensions: [
+            {
+              name: 'statusCodeCategory'
+              operator: 'Include'
+              values: [
+                '5xx'
+              ]
+            }
+          ]
         }
       ]
     }
@@ -309,7 +326,7 @@ resource sreAgent 'Microsoft.App/agents@2026-01-01' = {
     sreMonitoringReader
     sreContainerAppsContributor
     sreMonitoringContributor
-    cartMemoryAlert
+    cartRequests5xxAlert
   ]
 }
 
@@ -364,5 +381,7 @@ output API_BASE_URL string = 'https://${backend.outputs.fqdn}'
 output FRONTEND_URL string = 'https://${frontend.outputs.fqdn}'
 output LOG_ANALYTICS_WORKSPACE_ID string = observability.outputs.workspaceId
 output APPLICATION_INSIGHTS_ID string = observability.outputs.applicationInsightsId
+output CART_5XX_ALERT_ID string = cartRequests5xxAlert.id
+output CART_5XX_ALERT_NAME string = cartRequests5xxAlert.name
 output SRE_AGENT_ID string = sreAgent.id
 output SRE_AGENT_IDENTITY_CLIENT_ID string = sreIdentity.properties.clientId

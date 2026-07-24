@@ -1,123 +1,121 @@
-# Runbook: synthetic cart memory pressure
+# Runbook: synthetic cart memory capacity incident
 
 > **Fictional technical SRE demo. Not an official Mercadona system. All stores, products, prices, carts, orders, correlation IDs and metrics are synthetic; no claims about real operations.**
 
-## Scope and safety
+## Scope and emergency recovery
 
-This runbook applies only to `ca-mercadona-retail-api` in subscription `5305e853-a63b-4b82-9a3f-6fde18c1a798` and resource group `rg-mercadona-sre-agent-v1`. Never reuse these commands against another context. The scenario is off by default, bounded at 640 MiB, and isolated to the backend process.
-
-**Emergency recovery:**
+This runbook applies only to `ca-mercadona-retail-api` in subscription `5305e853-a63b-4b82-9a3f-6fde18c1a798` and resource group `rg-mercadona-sre-agent-v1`. The scenario is off by default, bounded at 640 MiB and limited to one backend replica.
 
 ```powershell
 .\scripts\recover-incident.ps1
 ```
 
+Recovery is idempotent. It sets `DEMO_CART_MEMORY_MB_PER_ADD=0`, `DEMO_CART_MEMORY_FAILURE_MB=0` and `DEMO_CART_MEMORY_MAX_MB=640`, then verifies cart, add, order and tracking. It never terminates local processes.
+
 ## Expected signal
 
-- Alert: `alert-mercadona-cart-memory`, Sev2.
-- Metric: `Microsoft.App/containerApps` / `WorkingSetBytes`.
-- Aggregation: `Maximum`.
-- Threshold: greater than `629145600` bytes.
-- Window/frequency: `PT5M` / `PT1M`.
-- Backend replicas: minimum 1, maximum 1.
-- Triggering workload: 64 valid sequential adds at exactly 10 MiB per add.
-- Process cap: 640 MiB retained bytes.
+| Property | Contract |
+|---|---|
+| Alert | `alert-mercadona-cart-5xx-sev3`, Sev3 |
+| Metric | `Microsoft.App/containerApps` / `Requests` |
+| Filter | `statusCodeCategory Include 5xx` |
+| Aggregation / threshold | `Total > 5` |
+| Window / frequency | `PT5M` / `PT1M` |
+| Scope | exact backend resource ID |
+| Workload | at most 80 sequential adds and five minutes |
+| Stop condition | six confirmed HTTP 5xx |
+| Memory | 10 MiB/add, controlled failure at 600 MiB, hard cap 640 MiB |
 
-The 600 MiB threshold gives the alert a 40 MiB margin before the retention cap. Before each demo, record a healthy baseline with retention disabled. Do not proceed if the baseline approaches the threshold.
+The service touches each page and keeps a process-lifetime strong root only after validating cart, product and quantity. The first 60 adds can retain 600 MiB. Later valid adds return HTTP 503 with `DEMO_CART_MEMORY_CAPACITY_EXHAUSTED`, no extra allocation and no cart mutation. With the failure threshold disabled, the 640 MiB cap still preserves successful responses.
 
-## Start and observe
+## Preflight and start
 
 ```powershell
 az account set --subscription 5305e853-a63b-4b82-9a3f-6fde18c1a798
+.\scripts\verify-sre-agent.ps1
 .\scripts\start-incident.ps1
 ```
 
-The script checks the pre-created resource group, enables `DEMO_CART_MEMORY_MB_PER_ADD=10`, waits for a **new** healthy revision, creates one cart, performs exactly 64 successful adds within five minutes, and polls the platform metric until it exceeds 600 MiB. It has bounded request and metric deadlines.
+The start script refuses to mutate unless:
 
-Expected API behavior remains healthy. Each response includes a synthetic correlation ID. Invalid carts/products and invalid quantities never allocate.
+- the exact Azure context and one healthy active revision are present;
+- per-add and failure variables are both zero, and the cap is 640;
+- the healthy add returns HTTP 200 with no allocation;
+- no recent 5xx or already-Fired matching alert exists;
+- the agent is Review/Low, the GitHub connector domain is authenticated, CodeRepo is Ready, GitHub exposes issue/branch/commit/PR tools, and the response plan is exact.
 
-## Investigate
+The finite injector preserves `X-Correlation-ID`, counts only actual HTTP 5xx, and stops at six 5xx, 80 requests or five minutes. Transport failures are not counted. It then verifies the platform metric, exact Fired alert, and a new agent thread. If the preview thread API does not expose response-plan metadata, it reports the one manual portal check rather than claiming an association.
 
-Find the active revision:
+`start-incident.ps1` never runs recovery.
 
-```powershell
-az containerapp revision list `
-  --subscription 5305e853-a63b-4b82-9a3f-6fde18c1a798 `
-  --resource-group rg-mercadona-sre-agent-v1 `
-  --name ca-mercadona-retail-api `
-  --query "[?properties.active].{Name:name,Health:properties.healthState,Running:properties.runningState,Created:properties.createdTime}" `
-  --output table
-```
+## Investigation evidence
 
-Inspect retained-byte events:
+Retained memory and controlled failures:
 
 ```kusto
 ContainerAppConsoleLogs_CL
 | where ContainerAppName_s == "ca-mercadona-retail-api"
-| where Log_s has "DEMO_CART_MEMORY_RETENTION"
+| where Log_s has_any ("DEMO_CART_MEMORY_RETENTION", "DEMO_CART_MEMORY_CAPACITY_EXHAUSTED")
 | project TimeGenerated, RevisionName_s, Log_s
 | order by TimeGenerated desc
 ```
 
-Correlate one operation:
+One synthetic correlation:
 
 ```kusto
-let correlation = "CORR-REPLACE-WITH-SYNTHETIC-ID";
+let correlation = "SYNTH-CART5XX-REPLACE";
 ContainerAppConsoleLogs_CL
 | where ContainerAppName_s == "ca-mercadona-retail-api"
 | where Log_s has correlation
 | project TimeGenerated, RevisionName_s, Log_s
 ```
 
-Measure event progression by revision:
+Application Insights requests:
 
 ```kusto
-ContainerAppConsoleLogs_CL
-| where ContainerAppName_s == "ca-mercadona-retail-api"
-| where Log_s has "RetainedBytes"
-| summarize RetentionEvents=count() by RevisionName_s, bin(TimeGenerated, 1m)
-| order by TimeGenerated desc
+requests
+| where cloud_RoleName == "ca-mercadona-retail-api" or name contains "/api/carts/"
+| where resultCode startswith "5"
+| project timestamp, name, resultCode, operation_Id, success
+| order by timestamp desc
 ```
 
-Query the metric:
+Platform signal:
 
 ```powershell
 $resourceId = "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourceGroups/rg-mercadona-sre-agent-v1/providers/Microsoft.App/containerApps/ca-mercadona-retail-api"
 az monitor metrics list `
   --resource $resourceId `
-  --metric WorkingSetBytes `
-  --aggregation Maximum `
-  --interval PT1M `
-  --output table
+  --metric Requests `
+  --aggregation Total `
+  --filter "statusCodeCategory eq '5xx'" `
+  --interval PT1M
 ```
 
-Evidence should converge on:
+Evidence should converge on the same revision and correlation IDs, 10,485,760-byte allocations up to 600 MiB, then 503 responses with zero allocation. Source evidence is the singleton strong-root collection in `CartMemoryRetentionService`.
 
-1. Valid add responses remain HTTP 200.
-2. Logs report 10,485,760 allocated bytes until the cap.
-3. `RetainedBytes` rises monotonically in one active revision.
-4. Source shows a singleton strong-root collection with no eviction.
-5. `WorkingSetBytes` rises past the threshold.
+## SRE Agent approval and GitHub boundary
 
-## SRE Agent approval boundary
+`incident-handler` and `mercadona-cart-5xx-sev3` stay in Review. The response plan is constrained by exact alert ID, title, Sev3 and backend resource. Known quickstart plans are removed; Arc filters are not modified.
 
-The SRE Agent and `mercadona-cart-memory-sev2` filter are `Review`. `code-analyzer` can use read tools and connected source to investigate. It may propose only:
+The only immediate mitigation is:
 
 ```text
+Create a clean revision with:
 DEMO_CART_MEMORY_MB_PER_ADD=0
+DEMO_CART_MEMORY_FAILURE_MB=0
+DEMO_CART_MEMORY_MAX_MB=640
 ```
 
-The proposal must create a fresh backend revision and must not alter replica limits, threshold, cap, identities, or source. A human must explicitly approve any write.
+A human must approve before the Azure write. After approval and healthy-flow verification, the agent can create a synthetic issue, branch, commit and pull request through the authenticated GitHub connector tools. It must not merge, dispatch workflows, deploy the PR or close the issue automatically. Global tool policy asks before writes and denies merge/workflow/deploy tools.
+
+If GitHub OAuth or a required capability is missing, configuration and verification stop with `INCOMPLETE`. Complete only **Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > Sign in**, enable issue/contents/pull-request writes, and rerun. Never paste tokens into source or output.
 
 ## GitHub bridge fallback
 
-Normal path: Azure Monitor alert -> Azure SRE Agent AzMonitor incident filter. The referenced action group intentionally has zero receivers and does not notify the agent.
+Normal routing is Azure Monitor -> exact response plan -> `incident-handler`. The secure Logic App fallback remains available for a title beginning `[SYNTHETIC]` plus label `sre-investigate`, or a manual ID beginning `SYNTH-`. It uses only `SRE_TRIGGER_URL`, managed identity to the protected trigger and HTTP 202 verification. It does not bypass Review.
 
-If alert ingestion is too slow for a live demo, run **SRE Agent controlled investigation** manually with an identifier beginning `SYNTH-`, or label an `[SYNTHETIC]` issue with exactly `sre-investigate`. The workflow sends jq-generated JSON to the signed Logic App callback and accepts only `202`, `success=true`, and nonempty `threadId`.
-
-The bridge forwards the original body to the protected trigger with managed identity. Do not add Azure login, OIDC, a bearer header, extra secrets, redirects, retries, callback outputs, or a public trigger.
-
-## Recover and verify
+## Recovery and reset
 
 ```powershell
 .\scripts\recover-incident.ps1
@@ -125,36 +123,24 @@ The bridge forwards the original body to the protected trigger with managed iden
 
 Expected outcome:
 
-- a new healthy revision;
-- `DEMO_CART_MEMORY_MB_PER_ADD=0`;
-- valid cart/add/order/tracking;
-- `AllocationBytes=0`;
-- a below-threshold metric sample, or an explicit safe warning if ingestion has not produced one yet.
+1. one healthy active revision;
+2. both injection/failure variables at zero;
+3. cart/add/order/tracking succeeds;
+4. `AllocationBytes=0`;
+5. no new 5xx;
+6. the exact alert resolves, or the script emits a latency warning.
 
-If the script cannot obtain a metric sample but the fresh revision and healthy flow pass, leave the incident disabled and continue monitoring. Never re-enable it while troubleshooting.
-
-## Costs, cleanup, and reset
-
-Charges can accrue for Container Apps, ACR, Log Analytics, Application Insights, Azure Monitor, Logic Apps, and Azure SRE Agent units. Keep the run short.
-
-Reset checklist:
-
-1. Run recovery.
-2. Confirm one active healthy backend revision.
-3. Confirm the memory-per-add variable is zero.
-4. Confirm the metric returns below 600 MiB and the alert resolves.
-5. Close synthetic issues and agent threads.
-6. Remove `SRE_TRIGGER_URL` before retirement.
-7. Delete only dedicated demo resources after owner approval.
+Do not inject another incident while the exact alert remains Fired.
 
 ## Troubleshooting
 
 | Problem | Safe response |
 |---|---|
-| Context guard fails | Stop; sign into the exact subscription and verify the pre-created resource group |
-| New revision is unhealthy | Keep the previous revision, inspect revision events/logs, do not generate load |
-| Adds fail | Stop the run; the scenario requires normal responses |
-| Cap is reached below metric threshold | Recover, validate baseline and platform metric ingestion before another run |
-| Alert is delayed | Use the manual `SYNTH-` workflow fallback, then recover |
-| Agent proposes another mutation | Reject it; only the zero-value environment change is allowed |
-| Bridge returns 502 | Inspect downstream agent availability and exact-scope role; do not expose trigger URLs |
+| Context or baseline guard fails | Stop; correct the exact subscription/resource group or recover |
+| Revision is unhealthy | Do not generate load; inspect revision events and logs |
+| Fewer than six 5xx | Recover; verify threshold variables and do not increase limits |
+| Metric or alert is delayed | Keep the finite run stopped; do not launch a second injector |
+| Thread is missing | Verify the exact response plan and wait; recover before retrying |
+| OAuth/capability is incomplete | Perform the single portal OAuth/capability step and rerun configuration |
+| Agent proposes another mutation | Reject it; only the clean revision with variables at zero is allowed |
+| Agent proposes merge/deploy | Reject it and inspect global tool policy |

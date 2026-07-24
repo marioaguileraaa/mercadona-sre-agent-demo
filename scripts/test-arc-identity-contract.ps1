@@ -3233,7 +3233,8 @@ Assert-True `
     ) `
     -Case 'Configurator validates existing and newly created connectors'
 $retailConfigureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'configure-sre-agent.ps1') -Raw
-Assert-Contains -Source $retailConfigureSource -Expected "titleContains = 'mercadona'" -Case 'Existing retail filter baseline'
+Assert-Contains -Source $retailConfigureSource -Expected 'titleContains = $cartAlertName' -Case 'Exact retail alert title filter'
+Assert-Contains -Source $retailConfigureSource -Expected 'targetResource = $backendResourceId' -Case 'Exact retail backend resource filter'
 Assert-NotMatches -Source $configureSource -Pattern "titleContains\s*=\s*'mercadona'" -Case 'Identity filter does not overlap retail namespace'
 $verifySource = $scriptSources['verify-arc-identity.ps1']
 Assert-Contains -Source $verifySource -Expected '$freshnessLookbackMinutes = $MaximumIngestionAgeMinutes + 5' -Case 'Verification lookback follows accepted freshness threshold'

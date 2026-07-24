@@ -26,7 +26,7 @@ flowchart LR
   Web -->|same-origin /api| Api[.NET retail API Container App]
   Api --> LAW[Log Analytics]
   Api --> AI[Application Insights]
-  Monitor[WorkingSetBytes Sev2 alert] --> AG[Action Group - 0 receivers]
+  Monitor[Requests 5xx Sev3 alert] --> AG[Action Group - 0 receivers]
   Monitor -. AzMonitor incident filter .-> Agent[Azure SRE Agent - Review/Low]
   Agent --> LAW
   Agent --> AI
@@ -45,20 +45,20 @@ All regional resources use `eastus2` in the pre-created resource group `rg-merca
 | Log Analytics / App Insights | `law-mercadona-demo-v1` / `appi-mercadona-demo-v1` |
 | Application / SRE UAMI | `id-mercadona-app-v1` / `id-mercadona-sre-v1` |
 | Azure SRE Agent | `sre-agent-mercadona-v1` |
-| Alert / action group | `alert-mercadona-cart-memory` / `ag-mercadona-sre-demo` |
+| Alert / action group | `alert-mercadona-cart-5xx-sev3` / `ag-mercadona-sre-demo` |
 | Trigger / bridge | `mercadona-controlled-issue` / `logic-mercadona-sre-trigger-v1` |
 
 Every resource uses `purpose=sre-agent-demo`, `environment=demo`, `dataClassification=synthetic`, and `scenario=synthetic-retail`.
 
 ## Controlled memory scenario
 
-`DEMO_CART_MEMORY_MB_PER_ADD` is startup-validated from `0` through `10` and defaults to `0`. `DEMO_CART_MEMORY_MAX_MB` is startup-validated from `10` through `640` and defaults to `640`.
+`DEMO_CART_MEMORY_MB_PER_ADD` is startup-validated from `0` through `10` and defaults to `0`. `DEMO_CART_MEMORY_MAX_MB` is startup-validated from `10` through `640` and defaults to `640`. `DEMO_CART_MEMORY_FAILURE_MB` defaults to `0`; when enabled it must be an exact positive multiple of the per-add value and cannot exceed the cap.
 
-When enabled at `10`, every **valid** cart/product add allocates exactly 10 MiB, touches each memory page, and strongly roots the block in a singleton process-lifetime collection. Invalid carts/products do not allocate. A lock makes the 640 MiB cap atomic under concurrency. Reaching the cap never changes the successful add response; there is no reset endpoint, forced collection, unbounded loop, or uncontrolled out-of-memory path.
+When enabled at `10`, every **valid** cart/product add allocates exactly 10 MiB, touches each memory page, and strongly roots the block in a singleton process-lifetime collection. Invalid carts/products do not allocate. A lock makes the 640 MiB cap atomic under concurrency. With the failure mode disabled, reaching the cap still preserves successful responses. The incident revision sets the safe failure threshold to 600 MiB; subsequent valid adds return HTTP 503 without another allocation or cart mutation. There is no reset endpoint, forced collection, unbounded loop, or uncontrolled out-of-memory path.
 
-Structured events contain `CorrelationId`, `CartId`, `StoreId`, `ProductId`, `Quantity`, `AllocationBytes`, `RetainedBytes`, `MaxRetainedBytes`, `ErrorCode=DEMO_CART_MEMORY_RETENTION`, and a plainly fictional `RootCauseClue`. No secrets or authentication material are logged.
+Structured events contain `CorrelationId`, `CartId`, `StoreId`, `ProductId`, `Quantity`, `AllocationBytes`, `RetainedBytes`, `MaxRetainedBytes`, `ErrorCode` (`DEMO_CART_MEMORY_RETENTION` or `DEMO_CART_MEMORY_CAPACITY_EXHAUSTED`), and a plainly fictional `RootCauseClue`. No secrets or authentication material are logged.
 
-The Sev2 metric alert evaluates the backend `WorkingSetBytes` maximum every minute over five minutes and fires above `629145600` bytes (600 MiB). The backend is fixed at one replica so the signal stays attributable. The 600 MiB threshold leaves about 40 MiB between alert crossing and the 640 MiB retention cap; validate the healthy baseline is comfortably below threshold before each demonstration.
+The Sev3 metric alert evaluates the backend `Requests` total every minute over five minutes with `statusCodeCategory=5xx`, and fires above five failures. The backend remains fixed at one replica so the signal and retained heap stay attributable. Application Insights request telemetry and Log Analytics console events provide the investigation evidence.
 
 ## Prerequisites and deployment
 
@@ -85,7 +85,9 @@ Configure the independent agent only after infrastructure succeeds:
 .\scripts\configure-sre-agent.ps1 -SetGitHubSecret
 ```
 
-The script preserves strict, idempotent configuration: Review/Low, Anthropic/Automatic, AzMonitor, 1000 monthly units, Preview upgrades, SRE UAMI action identity, Log Analytics and App Insights connectors, non-destructive repository reuse with null/main branch tolerance, and no redirects. The `code-analyzer` subagent and `mercadona-cart-memory-sev2` filter correlate working-set telemetry, retained-byte logs, active revision, and repository evidence. They may propose only `DEMO_CART_MEMORY_MB_PER_ADD=0`; writes always require explicit approval.
+The script preserves strict, idempotent configuration: Review/Low, Anthropic/Automatic, AzMonitor, 1000 monthly units, Preview upgrades, SRE UAMI action identity, Log Analytics and App Insights connectors, non-destructive repository reuse, and no redirects. The current data-plane API stores GitHub connector authentication as a host domain; the script requires that domain plus CodeRepo `Ready`, selects the catalog's exact issue/branch/commit/PR tools, and fails as `INCOMPLETE` if OAuth needs the one-time manual step **Builder > Connectors > GitHub OAuth > Sign in**. It never prints tokens.
+
+The `incident-handler` and `mercadona-cart-5xx-sev3` response plan correlate 5xx telemetry, retained-byte logs, active revision, and repository evidence. The plan is limited by exact alert ID, title, Sev3 and backend resource, and known quickstart plans are removed without touching Arc filters. Global tool policy asks before Azure/GitHub writes and denies merge, workflow and deploy tools.
 
 ## Run the incident and recover
 
@@ -95,12 +97,12 @@ The script preserves strict, idempotent configuration: Review/Low, Anthropic/Aut
 
 Expected result in roughly 3-10 minutes:
 
-- a new healthy backend revision with 10 MiB per valid add;
-- one synthetic cart and exactly 64 sequential successful adds within five minutes;
-- correlation IDs in every response;
-- retained bytes capped at 640 MiB;
-- `WorkingSetBytes` observed above 600 MiB;
-- Sev2 alert and SRE Agent investigation, subject to Azure Monitor latency.
+- a new healthy backend revision with 10 MiB per valid add and a 600 MiB controlled failure threshold;
+- a finite injector capped at 80 requests and five minutes;
+- at least six real HTTP 503 responses, each with its correlation ID, after the safe threshold;
+- `Requests` 5xx observed above five and `alert-mercadona-cart-5xx-sev3` Fired;
+- a new SRE Agent thread routed to `mercadona-cart-5xx-sev3`;
+- no automatic recovery, merge or deployment.
 
 **Recovery is mandatory immediately after the observation:**
 
@@ -108,7 +110,7 @@ Expected result in roughly 3-10 minutes:
 .\scripts\recover-incident.ps1
 ```
 
-Recovery creates a new process when retention is active, or safely reuses the healthy revision when it is already disabled. It verifies cart/add/order/tracking and checks for a below-threshold sample. The old retained heap disappears with the old revision.
+Recovery creates a new process with both demo memory variables at zero when injection is active, or safely reuses the healthy revision when already disabled. It verifies cart/add/order/tracking and waits for the exact alert to resolve. The old retained heap disappears with the old revision.
 
 If the metric alert is delayed, use the workflow's **Run workflow** action with an ID beginning `SYNTH-`. This is an emergency demonstration fallback, not a bypass of Review mode.
 
@@ -131,7 +133,7 @@ Retained-byte events:
 ```kusto
 ContainerAppConsoleLogs_CL
 | where ContainerAppName_s == "ca-mercadona-retail-api"
-| where Log_s has "DEMO_CART_MEMORY_RETENTION"
+| where Log_s has_any ("DEMO_CART_MEMORY_RETENTION", "DEMO_CART_MEMORY_CAPACITY_EXHAUSTED")
 | project TimeGenerated, RevisionName_s, Log_s
 | order by TimeGenerated desc
 ```
@@ -150,10 +152,10 @@ Query the platform metric:
 
 ```powershell
 $id = "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourceGroups/rg-mercadona-sre-agent-v1/providers/Microsoft.App/containerApps/ca-mercadona-retail-api"
-az monitor metrics list --resource $id --metric WorkingSetBytes --aggregation Maximum --interval PT1M
+az monitor metrics list --resource $id --metric Requests --aggregation Total --filter "statusCodeCategory eq '5xx'" --interval PT1M
 ```
 
-Detailed response procedures are in [`docs/runbooks/cart-memory-pressure.md`](docs/runbooks/cart-memory-pressure.md). The guided Spanish walkthrough is [`docs/guia-demo-paso-a-paso.md`](docs/guia-demo-paso-a-paso.md).
+Detailed response procedures are in [`docs/runbooks/cart-memory-pressure.md`](docs/runbooks/cart-memory-pressure.md). The guided Spanish walkthrough is [`docs/guia-demo-paso-a-paso.md`](docs/guia-demo-paso-a-paso.md), and the presenter script is [`docs/guion-demo-paridad-grubify.md`](docs/guion-demo-paridad-grubify.md).
 
 ## Additive Azure Arc identity POC
 
@@ -195,6 +197,8 @@ az bicep lint --file .\infra\trigger-bridge.bicep
 az bicep build --file .\infra\arc-identity.bicep
 az bicep lint --file .\infra\arc-identity.bicep
 pwsh -NoProfile -File .\scripts\test-configure-sre-agent-contract.ps1
+pwsh -NoProfile -File .\scripts\test-azure-demo-common-contract.ps1
+pwsh -NoProfile -File .\scripts\test-retail-incident-contract.ps1
 pwsh -NoProfile -File .\scripts\test-arc-identity-contract.ps1
 ```
 
@@ -205,8 +209,8 @@ The demo incurs normal charges for Container Apps, Log Analytics ingestion/reten
 Reset checklist:
 
 1. Run `.\scripts\recover-incident.ps1`.
-2. Confirm the active revision is healthy and `DEMO_CART_MEMORY_MB_PER_ADD=0`.
-3. Confirm `WorkingSetBytes` is below 600 MiB and the alert has resolved.
+2. Confirm the active revision is healthy and both `DEMO_CART_MEMORY_MB_PER_ADD=0` and `DEMO_CART_MEMORY_FAILURE_MB=0`.
+3. Confirm no new 5xx is produced and the exact Sev3 alert has resolved.
 4. Close synthetic issues and review agent threads.
 5. Remove `SRE_TRIGGER_URL` when retiring the demo.
 6. With owner approval, delete only resources tagged `purpose=sre-agent-demo` in the guarded resource group and remove their dedicated RBAC assignments.
@@ -218,6 +222,6 @@ Reset checklist:
 | Azure context guard fails | `az account show`; never bypass the exact subscription/resource-group check |
 | Revision does not become healthy | `az containerapp revision list -g rg-mercadona-sre-agent-v1 -n ca-mercadona-retail-api -o table` |
 | Metric is delayed | Wait for platform ingestion; use manual `SYNTH-` workflow only for the demo, then recover |
-| Alert does not fire | Confirm healthy baseline, one backend replica, alert enabled, and maximum above `629145600` |
+| Alert does not fire | Confirm six real 5xx responses, one backend replica, exact alert enabled, and `Requests` filtered to `statusCodeCategory=5xx` |
 | Workflow lacks `202` | Check the Logic App state and exact agent-scope Standard User assignment; never expose the protected trigger |
-| Repository indexing is incomplete | Complete GitHub authentication in Azure SRE Agent, then rerun configuration |
+| Repository or GitHub capabilities are incomplete | Complete **Builder > Connectors > GitHub OAuth** authentication, enable issue/contents/PR writes, then rerun configuration |

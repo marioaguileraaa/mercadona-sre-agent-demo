@@ -1,4 +1,5 @@
 import {
+  ApiErrorDetails,
   CartResponse,
   OrderResponse,
   Product,
@@ -10,7 +11,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly details: unknown,
+    public readonly details?: ApiErrorDetails,
   ) {
     super(message);
   }
@@ -24,7 +25,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
-  const body = response.status === 204 ? undefined : await response.json();
+  const body = response.status === 204 ? undefined : await response.json() as ApiErrorDetails;
   if (!response.ok) {
     throw new ApiError(body?.message || `API request failed (${response.status})`, response.status, body);
   }

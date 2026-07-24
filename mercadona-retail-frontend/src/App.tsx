@@ -37,12 +37,14 @@ import applesArtwork from './assets/product-apples.svg';
 import homeArtwork from './assets/product-home.svg';
 import pantryArtwork from './assets/product-pantry.svg';
 import produceArtwork from './assets/product-produce.svg';
-import { retailApi } from './services/api';
+import { ApiError, retailApi } from './services/api';
 import { Cart, Order, Product, Store, Tracking } from './types';
 import './App.css';
 
 const spanishDisclaimer =
   'Demo técnica SRE ficticia. No es un sistema oficial de Mercadona. Todas las tiendas, productos, precios, cestas, pedidos, identificadores de correlación y métricas son sintéticos; no se afirma nada sobre operaciones reales.';
+const requiredDisclaimer =
+  'Fictional technical SRE demo. Not an official Mercadona system. All stores, products, prices, carts, orders, correlation IDs and metrics are synthetic; no claims about real operations.';
 
 const productArtwork: Record<string, string> = {
   apple: applesArtwork,
@@ -214,8 +216,17 @@ function App() {
       const response = await retailApi.addCartItem(cart.id, product.id, 1);
       setCart(response.cart);
       setMessage(`${product.name} añadido. Correlación sintética: ${response.correlationId}`);
-    } catch {
-      setError('No hemos podido añadir el producto sintético.');
+    } catch (caught) {
+      if (caught instanceof ApiError &&
+          caught.status === 503 &&
+          caught.details?.errorCode === 'DEMO_CART_MEMORY_CAPACITY_EXHAUSTED') {
+        const correlation = caught.details.correlationId
+          ? ` Correlación sintética: ${caught.details.correlationId}.`
+          : '';
+        setError(`El carrito alcanzó el límite seguro de memoria de la demo.${correlation}`);
+      } else {
+        setError('No hemos podido añadir el producto sintético.');
+      }
     } finally {
       setBusy(false);
     }
@@ -250,7 +261,7 @@ function App() {
         <Box component="header" className="site-header">
           <Box className="demo-notice">
             <Container maxWidth="xl">
-              <Typography variant="caption">{spanishDisclaimer}</Typography>
+              <Typography variant="caption">{requiredDisclaimer} {spanishDisclaimer}</Typography>
             </Container>
           </Box>
           <Container maxWidth="xl" className="header-main">
@@ -648,7 +659,7 @@ function App() {
               </Typography>
             </Box>
             <Divider />
-            <Typography variant="caption" className="footer-disclaimer">{spanishDisclaimer}</Typography>
+            <Typography variant="caption" className="footer-disclaimer">{requiredDisclaimer} {spanishDisclaimer}</Typography>
           </Container>
         </Box>
 

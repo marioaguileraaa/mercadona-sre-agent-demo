@@ -30,17 +30,34 @@ public sealed class CartsController(RetailStateService retail) : ControllerBase
     public IActionResult AddItem(string cartId, AddCartItemRequest request)
     {
         var result = retail.AddItem(cartId, request.ProductId, request.Quantity, HttpContext.TraceIdentifier);
-        return result.IsSuccess
-            ? Ok(new
+        if (result.IsSuccess)
+        {
+            return Ok(new
             {
                 result.Cart,
                 result.AllocationBytes,
                 result.RetainedBytes,
                 result.MaxRetainedBytes,
                 correlationId = HttpContext.TraceIdentifier
-            })
-            : result.ErrorCode == "CART_NOT_FOUND"
-                ? NotFound(new { result.ErrorCode, correlationId = HttpContext.TraceIdentifier })
-                : BadRequest(new { result.ErrorCode, correlationId = HttpContext.TraceIdentifier });
+            });
+        }
+
+        if (result.ErrorCode == CartMemoryRetentionService.CapacityErrorCode)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                message = "El carrito sintético alcanzó el límite seguro de memoria de la demo. Inténtalo tras la recuperación controlada.",
+                result.ErrorCode,
+                result.AllocationBytes,
+                result.RetainedBytes,
+                result.MaxRetainedBytes,
+                RootCauseClue = CartMemoryRetentionService.RootCauseClue,
+                correlationId = HttpContext.TraceIdentifier
+            });
+        }
+
+        return result.ErrorCode == "CART_NOT_FOUND"
+            ? NotFound(new { result.ErrorCode, correlationId = HttpContext.TraceIdentifier })
+            : BadRequest(new { result.ErrorCode, correlationId = HttpContext.TraceIdentifier });
     }
 }
