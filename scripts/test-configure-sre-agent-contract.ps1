@@ -21,7 +21,9 @@ $requiredFunctions = @(
     'ConvertFrom-Base64Url',
     'Get-ArmAccessTokenIdentity',
     'Get-OptionalPropertyValue',
-    'Get-FirstOptionalPropertyValue'
+    'Get-FirstOptionalPropertyValue',
+    'Disable-IncidentFilter',
+    'Sync-RetailIncidentFilters'
 )
 foreach ($functionName in $requiredFunctions) {
     $functionAst = $scriptAst.Find({
@@ -356,9 +358,259 @@ if ($source -notmatch "priorities\s*=\s*@\('Sev3'\)" -or
     $source -notmatch 'mergeEnabled\s*=\s*\$false') {
     throw 'Sev3 Review response-plan guardrails were not found.'
 }
-if ($source -notmatch "quickstart_response_plan" -or
-    $source -notmatch "quickstart_handler") {
-    throw 'Known competing quickstart response plans are not removed explicitly.'
+if (-not $source.Contains(
+        "-Path '/api/v2/extendedAgent/incidentFilters/quickstart_response_plan'",
+        [StringComparison]::Ordinal
+    ) -or
+    -not $source.Contains(
+        "`$quickstartResponsePlanId = 'quickstart_response_plan'",
+        [StringComparison]::Ordinal
+    ) -or
+    $source -notmatch '(?s)\[string\]::Equals\(\s*\$quickstartResponsePlanId,\s*''quickstart_response_plan'',\s*\[StringComparison\]::Ordinal\s*\)') {
+    throw 'The exact quickstart_response_plan deletion guard was not found.'
 }
+
+$deleteCalls = @($commandAsts | Where-Object {
+        $_.GetCommandName() -eq 'Invoke-AgentApi' -and
+        $_.Extent.Text -match '(?i)-Method\s+Delete'
+    })
+Assert-Equal `
+    -Actual $deleteCalls.Count `
+    -Expected 1 `
+    -Case 'Only one IncidentFilter delete call exists'
+if ($deleteCalls[0].Extent.Text -notmatch "/incidentFilters/quickstart_response_plan'") {
+    throw 'The only IncidentFilter delete does not target the exact approved quickstart_response_plan ID.'
+}
+if ($source -match '(?s)-Method\s+Delete.*?(mercadona-cart-memory-sev2|quickstart_handler)') {
+    throw 'A preserved IncidentFilter can still be deleted.'
+}
+
+$syncFunctionAst = $scriptAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Sync-RetailIncidentFilters'
+}, $true)
+$mutatedSyncSource = $syncFunctionAst.Extent.Text.
+    Replace(
+        'function Sync-RetailIncidentFilters {',
+        'function Invoke-MutatedRetailIncidentFilterSync {'
+    ).
+    Replace(
+        '$quickstartResponsePlanId = ''quickstart_response_plan''',
+        '$quickstartResponsePlanId = ''unexpected_response_plan'''
+    )
+. ([scriptblock]::Create($mutatedSyncSource))
+Assert-Throws `
+    -Action { Invoke-MutatedRetailIncidentFilterSync -ConfiguredFilters @() } `
+    -ExpectedMessage 'The approved disposable IncidentFilter ID must remain quickstart_response_plan.' `
+    -Case 'Mutated disposable filter constant is rejected before cleanup'
+
+function New-TestIncidentFilter {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Id,
+        [Parameter(Mandatory)]
+        [bool] $IsEnabled,
+        [string] $HandlingAgent = 'synthetic-handler',
+        [switch] $Flat
+    )
+
+    if ($Flat) {
+        return [pscustomobject]@{
+            id = $Id
+            name = $Id
+            type = 'IncidentFilter'
+            tags = @('synthetic-contract')
+            owner = 'synthetic-owner'
+            isEnabled = $IsEnabled
+            handlingAgent = $HandlingAgent
+            historyMarker = "history-$Id"
+        }
+    }
+    return [pscustomobject]@{
+        id = $Id
+        name = $Id
+        type = 'IncidentFilter'
+        tags = @('synthetic-contract')
+        owner = 'synthetic-owner'
+        properties = [pscustomobject]@{
+            isEnabled = $IsEnabled
+            handlingAgent = $HandlingAgent
+            historyMarker = "history-$Id"
+        }
+    }
+}
+
+$script:fakeIncidentFilters = [System.Collections.Generic.Dictionary[string, object]]::new(
+    [StringComparer]::Ordinal
+)
+$script:fakeIncidentFilters['mercadona-cart-5xx-sev3'] = New-TestIncidentFilter `
+    -Id 'mercadona-cart-5xx-sev3' `
+    -IsEnabled $true `
+    -HandlingAgent 'incident-handler'
+$script:fakeIncidentFilters['mercadona-cart-memory-sev2'] = New-TestIncidentFilter `
+    -Id 'mercadona-cart-memory-sev2' `
+    -IsEnabled $true `
+    -Flat
+$script:fakeIncidentFilters['quickstart_handler'] = New-TestIncidentFilter `
+    -Id 'quickstart_handler' `
+    -IsEnabled $true
+$script:fakeIncidentFilters['quickstart_response_plan'] = New-TestIncidentFilter `
+    -Id 'quickstart_response_plan' `
+    -IsEnabled $true
+$script:fakeIncidentFilters['Quickstart_response_plan'] = New-TestIncidentFilter `
+    -Id 'Quickstart_response_plan' `
+    -IsEnabled $true
+$script:fakeIncidentFilters['identity-infrastructure-sev2'] = New-TestIncidentFilter `
+    -Id 'identity-infrastructure-sev2' `
+    -IsEnabled $true `
+    -HandlingAgent 'identity-infrastructure-analyzer'
+$script:fakeIncidentFilterCalls = [System.Collections.Generic.List[object]]::new()
+
+function Invoke-AgentApi {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Method,
+        [Parameter(Mandatory)]
+        [string] $Path,
+        [AllowNull()]
+        [object] $Body
+    )
+
+    $filterId = $Path.Substring($Path.LastIndexOf('/') + 1)
+    $script:fakeIncidentFilterCalls.Add([pscustomobject]@{
+            Method = $Method
+            Path = $Path
+            Body = $Body
+        })
+    switch ($Method) {
+        'Get' {
+            if (-not $script:fakeIncidentFilters.ContainsKey($filterId)) {
+                throw "Fake IncidentFilter '$filterId' was not found."
+            }
+            return $script:fakeIncidentFilters[$filterId]
+        }
+        'Put' {
+            $script:fakeIncidentFilters[$filterId] = [pscustomobject] $Body
+            return $script:fakeIncidentFilters[$filterId]
+        }
+        'Delete' {
+            $script:fakeIncidentFilters.Remove($filterId)
+            return $null
+        }
+        default {
+            throw "Unexpected fake IncidentFilter API method '$Method'."
+        }
+    }
+}
+
+Sync-RetailIncidentFilters -ConfiguredFilters @($script:fakeIncidentFilters.Values)
+Sync-RetailIncidentFilters -ConfiguredFilters @($script:fakeIncidentFilters.Values)
+
+$deleteFilterCalls = @($script:fakeIncidentFilterCalls | Where-Object { $_.Method -eq 'Delete' })
+Assert-Equal `
+    -Actual $deleteFilterCalls.Count `
+    -Expected 1 `
+    -Case 'Idempotent cleanup delete count'
+Assert-Equal `
+    -Actual $deleteFilterCalls[0].Path `
+    -Expected '/api/v2/extendedAgent/incidentFilters/quickstart_response_plan' `
+    -Case 'Exact disposable response plan deletion'
+foreach ($preservedFilterId in @(
+        'mercadona-cart-memory-sev2',
+        'quickstart_handler',
+        'identity-infrastructure-sev2'
+    )) {
+    $preservedDeletes = @($deleteFilterCalls | Where-Object {
+            $_.Path -eq "/api/v2/extendedAgent/incidentFilters/$preservedFilterId"
+        })
+    Assert-Equal `
+        -Actual $preservedDeletes.Count `
+        -Expected 0 `
+        -Case "No delete for preserved IncidentFilter $preservedFilterId"
+}
+Assert-Equal `
+    -Actual $script:fakeIncidentFilters['mercadona-cart-memory-sev2'].properties.isEnabled `
+    -Expected $false `
+    -Case 'Legacy retail filter disabled'
+Assert-Equal `
+    -Actual $script:fakeIncidentFilters['quickstart_handler'].properties.isEnabled `
+    -Expected $false `
+    -Case 'Competing quickstart handler disabled'
+Assert-Equal `
+    -Actual $script:fakeIncidentFilters['identity-infrastructure-sev2'].properties.isEnabled `
+    -Expected $true `
+    -Case 'Arc filter remains enabled'
+Assert-Equal `
+    -Actual $script:fakeIncidentFilters['identity-infrastructure-sev2'].properties.historyMarker `
+    -Expected 'history-identity-infrastructure-sev2' `
+    -Case 'Arc filter remains intact'
+Assert-Equal `
+    -Actual $script:fakeIncidentFilters['Quickstart_response_plan'].properties.isEnabled `
+    -Expected $true `
+    -Case 'Case-variant quickstart filter remains intact'
+Assert-Equal `
+    -Actual $script:fakeIncidentFilters['mercadona-cart-memory-sev2'].properties.historyMarker `
+    -Expected 'history-mercadona-cart-memory-sev2' `
+    -Case 'Legacy filter payload is preserved'
+
+$enabledRetailRoutes = @(
+    @(
+        'mercadona-cart-5xx-sev3',
+        'mercadona-cart-memory-sev2',
+        'quickstart_handler'
+    ) | Where-Object {
+        $script:fakeIncidentFilters.ContainsKey($_) -and
+        $script:fakeIncidentFilters[$_].properties.isEnabled -eq $true
+    }
+)
+Assert-Equal `
+    -Actual $enabledRetailRoutes.Count `
+    -Expected 1 `
+    -Case 'Exactly one retail routing filter remains enabled'
+
+$preservedPutCalls = @($script:fakeIncidentFilterCalls | Where-Object {
+        $_.Method -eq 'Put' -and
+        $_.Path -in @(
+            '/api/v2/extendedAgent/incidentFilters/mercadona-cart-memory-sev2',
+            '/api/v2/extendedAgent/incidentFilters/quickstart_handler'
+        )
+    })
+Assert-Equal `
+    -Actual $preservedPutCalls.Count `
+    -Expected 2 `
+    -Case 'Repeated reconciliation does not rewrite disabled filters'
+foreach ($putCall in $preservedPutCalls) {
+    Assert-Equal `
+        -Actual $putCall.Body.type `
+        -Expected 'IncidentFilter' `
+        -Case "PUT preserves type for $($putCall.Path)"
+    Assert-Equal `
+        -Actual $putCall.Body.properties.isEnabled `
+        -Expected $false `
+        -Case "PUT disables $($putCall.Path)"
+}
+
+$null = $script:fakeIncidentFilters.Remove('quickstart_handler')
+Sync-RetailIncidentFilters -ConfiguredFilters @($script:fakeIncidentFilters.Values)
+$null = $script:fakeIncidentFilters.Remove('mercadona-cart-memory-sev2')
+$script:fakeIncidentFilters['quickstart_response_plan'] = New-TestIncidentFilter `
+    -Id 'quickstart_response_plan' `
+    -IsEnabled $true
+$callsBeforeMissingLegacyProbe = $script:fakeIncidentFilterCalls.Count
+Assert-Throws `
+    -Action {
+        Sync-RetailIncidentFilters -ConfiguredFilters @($script:fakeIncidentFilters.Values)
+    } `
+    -ExpectedMessage "Required legacy IncidentFilter 'mercadona-cart-memory-sev2' was not found for non-destructive migration." `
+    -Case 'Missing legacy IncidentFilter fails reconciliation'
+Assert-Equal `
+    -Actual $script:fakeIncidentFilterCalls.Count `
+    -Expected $callsBeforeMissingLegacyProbe `
+    -Case 'Missing legacy filter fails before any API mutation'
+Assert-Equal `
+    -Actual $script:fakeIncidentFilters.ContainsKey('quickstart_response_plan') `
+    -Expected $true `
+    -Case 'Missing legacy filter preserves disposable plan until reconciliation can proceed'
 
 Write-Host 'configure-sre-agent strict-mode response contract passed.'

@@ -128,4 +128,90 @@ if (-not $common.Contains("--filter `"statusCodeCategory eq '5xx'`"", [StringCom
     throw 'The common metric helper does not filter Requests to 5xx.'
 }
 
+function Assert-Throws {
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock] $Action,
+        [Parameter(Mandatory)]
+        [string] $ExpectedMessage,
+        [Parameter(Mandatory)]
+        [string] $Case
+    )
+
+    try {
+        & $Action
+    } catch {
+        if ($_.Exception.Message -ne $ExpectedMessage) {
+            throw "$Case failed. Expected error '$ExpectedMessage', got '$($_.Exception.Message)'."
+        }
+        return
+    }
+    throw "$Case failed. Expected an exception."
+}
+
+$verifyPath = "$PSScriptRoot\verify-sre-agent.ps1"
+$verifyTokens = $null
+$verifyErrors = $null
+$verifyAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $verifyPath,
+    [ref] $verifyTokens,
+    [ref] $verifyErrors
+)
+foreach ($functionName in @(
+        'Get-OptionalValue',
+        'Get-AgentProperty',
+        'Get-IncidentFilterId',
+        'Assert-RetailIncidentFilterMigration'
+    )) {
+    $functionAst = $verifyAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $functionName
+    }, $true)
+    if ($null -eq $functionAst) {
+        throw "Retail verifier function '$functionName' was not found."
+    }
+    . ([scriptblock]::Create($functionAst.Extent.Text))
+}
+
+$disabledLegacyFilter = [pscustomobject]@{
+    id = 'mercadona-cart-memory-sev2'
+    properties = [pscustomobject]@{ isEnabled = $false }
+}
+$disabledQuickstartHandler = [pscustomobject]@{
+    id = 'quickstart_handler'
+    properties = [pscustomobject]@{ isEnabled = $false }
+}
+$enabledQuickstartHandler = [pscustomobject]@{
+    id = 'quickstart_handler'
+    properties = [pscustomobject]@{ isEnabled = $true }
+}
+$enabledLegacyFilter = [pscustomobject]@{
+    id = 'mercadona-cart-memory-sev2'
+    properties = [pscustomobject]@{ isEnabled = $true }
+}
+
+Assert-RetailIncidentFilterMigration -Plans @($disabledLegacyFilter)
+Assert-RetailIncidentFilterMigration -Plans @(
+    $disabledLegacyFilter,
+    $disabledQuickstartHandler
+)
+Assert-Throws `
+    -Action { Assert-RetailIncidentFilterMigration -Plans @() } `
+    -ExpectedMessage "Required migrated IncidentFilter 'mercadona-cart-memory-sev2' is missing." `
+    -Case 'Verifier rejects missing migrated legacy filter'
+Assert-Throws `
+    -Action { Assert-RetailIncidentFilterMigration -Plans @($enabledLegacyFilter) } `
+    -ExpectedMessage "Migrated IncidentFilter 'mercadona-cart-memory-sev2' must be disabled." `
+    -Case 'Verifier rejects enabled migrated legacy filter'
+Assert-Throws `
+    -Action {
+        Assert-RetailIncidentFilterMigration -Plans @(
+            $disabledLegacyFilter,
+            $enabledQuickstartHandler
+        )
+    } `
+    -ExpectedMessage "Optional competing IncidentFilter 'quickstart_handler' must be disabled when present." `
+    -Case 'Verifier rejects enabled optional quickstart handler'
+
 Write-Host 'Safe retail incident contract passed.'
