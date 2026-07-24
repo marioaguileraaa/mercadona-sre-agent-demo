@@ -68,16 +68,17 @@ The Sev3 metric alert evaluates the backend `Requests` total every minute over f
 - `az bicep` CLI support
 - `gh` CLI for SRE Agent repository/secret configuration
 - Pre-created `rg-mercadona-sre-agent-v1`
+- Pre-created Arc scope `rg-arcbox-itpro-weu-002`
 
 No script creates the resource group. No script in this repository runs automatically.
 
 ```powershell
 az login
 az account set --subscription 5305e853-a63b-4b82-9a3f-6fde18c1a798
-.\scripts\deploy.ps1
+.\scripts\deploy.ps1 -ArcResourceGroupName rg-arcbox-itpro-weu-002
 ```
 
-`deploy.ps1` performs two convergent Bicep passes: placeholder images first, remote ACR builds from each project directory second, then immutable tagged images. It waits for `Healthy` plus `Running`, `RunningAtMinScale`, or `RunningAtMaxScale`, then verifies API health, stores, cart, valid add, order, tracking, frontend text, and same-origin health. Created responses retain `-MaximumRedirection 0`.
+`deploy.ps1` performs two convergent Bicep passes: placeholder images first, remote ACR builds from each project directory second, then immutable tagged images. Before each create it requests full JSON what-if payloads and aborts if either the retail or Arc managed-resource ID would be removed from the SRE Agent, or if the deployment unexpectedly mutates an Arc-scope resource. It waits for `Healthy` plus `Running`, `RunningAtMinScale`, or `RunningAtMaxScale`, then verifies API health, stores, cart, valid add, order, tracking, frontend text, and same-origin health. Created responses retain `-MaximumRedirection 0`.
 
 Configure the independent agent only after infrastructure succeeds:
 
@@ -200,6 +201,7 @@ pwsh -NoProfile -File .\scripts\test-configure-sre-agent-contract.ps1
 pwsh -NoProfile -File .\scripts\test-azure-demo-common-contract.ps1
 pwsh -NoProfile -File .\scripts\test-retail-incident-contract.ps1
 pwsh -NoProfile -File .\scripts\test-arc-identity-contract.ps1
+pwsh -NoProfile -File .\scripts\test-sre-agent-what-if-contract.ps1
 ```
 
 ## Cost, cleanup, and reset

@@ -1,0 +1,195 @@
+{
+  "subscriptionId": "11111111-2222-3333-4444-555555555555",
+  "retailResourceGroupName": "rg-retail-fixture",
+  "arcResourceGroupName": "rg-arc-fixture",
+  "agentName": "sre-agent-fixture",
+  "cases": [
+    {
+      "name": "both scopes present",
+      "shouldPass": true,
+      "whatIf": {
+        "status": "Succeeded",
+        "changes": [
+          {
+            "resourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture/providers/Microsoft.App/agents/sre-agent-fixture",
+            "changeType": "Modify",
+            "after": {
+              "properties": {
+                "knowledgeGraphConfiguration": {
+                  "managedResources": [
+                    "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture",
+                    "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-fixture"
+                  ]
+                }
+              }
+            },
+            "delta": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "Arc scope Delete",
+      "shouldPass": false,
+      "whatIf": {
+        "status": "Succeeded",
+        "changes": [
+          {
+            "resourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture/providers/Microsoft.App/agents/sre-agent-fixture",
+            "changeType": "Modify",
+            "after": {
+              "properties": {
+                "knowledgeGraphConfiguration": {
+                  "managedResources": [
+                    "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture"
+                  ]
+                }
+              }
+            },
+            "delta": [
+              {
+                "path": "properties.knowledgeGraphConfiguration.managedResources",
+                "propertyChangeType": "Array",
+                "children": [
+                  {
+                    "path": "1",
+                    "propertyChangeType": "Delete",
+                    "before": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-fixture",
+                    "after": null
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "retail scope Delete",
+      "shouldPass": false,
+      "whatIf": {
+        "status": "Succeeded",
+        "changes": [
+          {
+            "resourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture/providers/Microsoft.App/agents/sre-agent-fixture",
+            "changeType": "Modify",
+            "after": {
+              "properties": {
+                "knowledgeGraphConfiguration": {
+                  "managedResources": [
+                    "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-fixture"
+                  ]
+                }
+              }
+            },
+            "delta": [
+              {
+                "path": "properties.knowledgeGraphConfiguration.managedResources",
+                "propertyChangeType": "Array",
+                "children": [
+                  {
+                    "path": "0",
+                    "propertyChangeType": "Delete",
+                    "before": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture",
+                    "after": null
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "array replacement without Arc",
+      "shouldPass": false,
+      "whatIf": {
+        "status": "Succeeded",
+        "changes": [
+          {
+            "resourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture/providers/Microsoft.App/agents/sre-agent-fixture",
+            "changeType": "Modify",
+            "after": {
+              "properties": {
+                "knowledgeGraphConfiguration": {
+                  "managedResources": [
+                    "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture"
+                  ]
+                }
+              }
+            },
+            "delta": [
+              {
+                "path": "properties.knowledgeGraphConfiguration.managedResources",
+                "propertyChangeType": "Modify",
+                "before": [
+                  "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture",
+                  "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-fixture"
+                ],
+                "after": [
+                  "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "retail changes allowed",
+      "shouldPass": true,
+      "whatIf": {
+        "status": "Succeeded",
+        "changes": [
+          {
+            "resourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-retail-fixture/providers/Microsoft.App/containerApps/ca-retail-api",
+            "changeType": "Modify",
+            "delta": [
+              {
+                "path": "properties.template.containers.0.image",
+                "propertyChangeType": "Modify",
+                "before": "synthetic.example/retail:old",
+                "after": "synthetic.example/retail:new"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "unexpected Arc object Modify",
+      "shouldPass": false,
+      "whatIf": {
+        "status": "Succeeded",
+        "changes": [
+          {
+            "resourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-fixture/providers/Microsoft.HybridCompute/machines/arcbox-fixture",
+            "changeType": "Modify",
+            "delta": [
+              {
+                "path": "tags.synthetic",
+                "propertyChangeType": "Modify",
+                "before": "old",
+                "after": "new"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "known role assignment Unsupported",
+      "shouldPass": true,
+      "whatIf": {
+        "status": "Succeeded",
+        "changes": [
+          {
+            "resourceId": "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-arc-fixture/providers/Microsoft.Authorization/roleAssignments/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "changeType": "Unsupported",
+            "unsupportedReason": "Role assignment result cannot be predicted."
+          }
+        ]
+      }
+    }
+  ]
+}
