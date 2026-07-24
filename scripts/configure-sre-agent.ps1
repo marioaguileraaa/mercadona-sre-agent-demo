@@ -415,6 +415,23 @@ function Sync-RetailIncidentFilters {
     $legacyRetailFilterId = 'mercadona-cart-memory-sev2'
     $quickstartHandlerFilterId = 'quickstart_handler'
     $quickstartResponsePlanId = 'quickstart_response_plan'
+    if (-not [string]::Equals(
+            $quickstartResponsePlanId,
+            'quickstart_response_plan',
+            [StringComparison]::Ordinal
+        )) {
+        throw 'The approved disposable IncidentFilter ID must remain quickstart_response_plan.'
+    }
+
+    $legacyRetailFilterFound = $ConfiguredFilters | Where-Object {
+        $candidateId = [string](Get-FirstOptionalPropertyValue `
+                -InputObject $_ `
+                -PropertyNames @('id', 'filterId', 'name'))
+        [string]::Equals($candidateId, $legacyRetailFilterId, [StringComparison]::Ordinal)
+    } | Select-Object -First 1
+    if ($null -eq $legacyRetailFilterFound) {
+        throw "Required legacy IncidentFilter '$legacyRetailFilterId' was not found for non-destructive migration."
+    }
 
     foreach ($configuredFilter in $ConfiguredFilters) {
         $filterId = [string](Get-FirstOptionalPropertyValue `
@@ -423,7 +440,6 @@ function Sync-RetailIncidentFilters {
         if ([string]::IsNullOrWhiteSpace($filterId)) {
             continue
         }
-
         if ([string]::Equals($filterId, $legacyRetailFilterId, [StringComparison]::Ordinal)) {
             Disable-IncidentFilter `
                 -FilterId $legacyRetailFilterId `
@@ -437,13 +453,6 @@ function Sync-RetailIncidentFilters {
             continue
         }
         if ([string]::Equals($filterId, $quickstartResponsePlanId, [StringComparison]::Ordinal)) {
-            if (-not [string]::Equals(
-                    $filterId,
-                    'quickstart_response_plan',
-                    [StringComparison]::Ordinal
-                )) {
-                throw "Refusing to delete non-approved IncidentFilter '$filterId'."
-            }
             Invoke-AgentApi `
                 -Method Delete `
                 -Path '/api/v2/extendedAgent/incidentFilters/quickstart_response_plan' `

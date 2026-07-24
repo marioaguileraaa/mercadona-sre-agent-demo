@@ -40,6 +40,56 @@ function Get-AgentProperty {
     return Get-OptionalValue -InputObject $InputObject -Name $Name
 }
 
+function Get-IncidentFilterId {
+    param(
+        [AllowNull()][object] $InputObject
+    )
+
+    foreach ($propertyName in @('id', 'filterId', 'name')) {
+        $value = Get-AgentProperty -InputObject $InputObject -Name $propertyName
+        if (-not [string]::IsNullOrWhiteSpace([string] $value)) {
+            return [string] $value
+        }
+    }
+    return $null
+}
+
+function Assert-RetailIncidentFilterMigration {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]] $Plans
+    )
+
+    $legacyFilterId = 'mercadona-cart-memory-sev2'
+    $legacyFilter = $Plans | Where-Object {
+        [string]::Equals(
+            (Get-IncidentFilterId -InputObject $_),
+            $legacyFilterId,
+            [StringComparison]::Ordinal
+        )
+    } | Select-Object -First 1
+    if ($null -eq $legacyFilter) {
+        throw "Required migrated IncidentFilter '$legacyFilterId' is missing."
+    }
+    if ((Get-AgentProperty -InputObject $legacyFilter -Name 'isEnabled') -ne $false) {
+        throw "Migrated IncidentFilter '$legacyFilterId' must be disabled."
+    }
+
+    $quickstartHandlerFilterId = 'quickstart_handler'
+    $quickstartHandlerFilter = $Plans | Where-Object {
+        [string]::Equals(
+            (Get-IncidentFilterId -InputObject $_),
+            $quickstartHandlerFilterId,
+            [StringComparison]::Ordinal
+        )
+    } | Select-Object -First 1
+    if ($null -ne $quickstartHandlerFilter -and
+        (Get-AgentProperty -InputObject $quickstartHandlerFilter -Name 'isEnabled') -ne $false) {
+        throw "Optional competing IncidentFilter '$quickstartHandlerFilterId' must be disabled when present."
+    }
+}
+
 Assert-DemoAzureContext -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName
 
 $agentResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/agents/$AgentName"
@@ -225,7 +275,7 @@ $plans = if ($null -ne $plansResponse.PSObject.Properties['value']) {
 }
 $quickstartResponsePlan = $plans | Where-Object {
     [string]::Equals(
-        [string](Get-AgentProperty -InputObject $_ -Name 'name'),
+        (Get-IncidentFilterId -InputObject $_),
         'quickstart_response_plan',
         [StringComparison]::Ordinal
     )
@@ -233,19 +283,7 @@ $quickstartResponsePlan = $plans | Where-Object {
 if ($null -ne $quickstartResponsePlan) {
     throw "Disposable response plan 'quickstart_response_plan' is still present."
 }
-foreach ($preservedPlanName in @('mercadona-cart-memory-sev2', 'quickstart_handler')) {
-    $preservedPlan = $plans | Where-Object {
-        [string]::Equals(
-            [string](Get-AgentProperty -InputObject $_ -Name 'name'),
-            $preservedPlanName,
-            [StringComparison]::Ordinal
-        )
-    } | Select-Object -First 1
-    if ($null -ne $preservedPlan -and
-        (Get-AgentProperty -InputObject $preservedPlan -Name 'isEnabled') -ne $false) {
-        throw "Preserved competing response plan '$preservedPlanName' must be disabled."
-    }
-}
+Assert-RetailIncidentFilterMigration -Plans @($plans)
 
 $globalSettings = Invoke-SreAgentRead -Endpoint $endpoint -Path '/api/v2/agent/settings/global'
 $permissions = Get-OptionalValue -InputObject $globalSettings -Name 'permissions'
