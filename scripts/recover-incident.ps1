@@ -5,29 +5,47 @@ param(
     [string] $ResourceGroupName = 'rg-mercadona-sre-agent-v1',
     [string] $BackendAppName = 'ca-mercadona-retail-api',
     [string] $BackendContainerName = 'mercadona-retail-api',
-    [int] $MetricTimeoutSeconds = 300
+    [ValidateRange(30, 900)]
+    [int] $AlertTimeoutSeconds = 300
 )
 
 . "$PSScriptRoot\AzureDemo.Common.ps1"
+
+$alertName = 'alert-mercadona-cart-5xx-sev3'
+$alertRuleId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Insights/metricAlerts/$alertName"
+$backendResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/$BackendAppName"
 
 Assert-DemoAzureContext -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName
 $previousRevision = Get-ActiveContainerAppRevision `
     -SubscriptionId $SubscriptionId `
     -ResourceGroupName $ResourceGroupName `
     -ContainerAppName $BackendAppName
-$currentMemoryPerAdd = Get-ContainerAppRevisionEnvironmentVariableValue `
-    -SubscriptionId $SubscriptionId `
-    -ResourceGroupName $ResourceGroupName `
-    -ContainerAppName $BackendAppName `
-    -RevisionName $previousRevision.name `
-    -VariableName 'DEMO_CART_MEMORY_MB_PER_ADD'
 Assert-ContainerAppSingleReadyRevision `
     -SubscriptionId $SubscriptionId `
     -ResourceGroupName $ResourceGroupName `
     -ContainerAppName $BackendAppName `
     -ExpectedRevisionName $previousRevision.name
 
-if ($currentMemoryPerAdd -ne '0') {
+$currentMemoryPerAdd = Get-ContainerAppRevisionEnvironmentVariableValue `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -ContainerAppName $BackendAppName `
+    -RevisionName $previousRevision.name `
+    -VariableName 'DEMO_CART_MEMORY_MB_PER_ADD'
+$currentFailureThreshold = Get-ContainerAppRevisionEnvironmentVariableValue `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -ContainerAppName $BackendAppName `
+    -RevisionName $previousRevision.name `
+    -VariableName 'DEMO_CART_MEMORY_FAILURE_MB'
+$currentMemoryCap = Get-ContainerAppRevisionEnvironmentVariableValue `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -ContainerAppName $BackendAppName `
+    -RevisionName $previousRevision.name `
+    -VariableName 'DEMO_CART_MEMORY_MAX_MB'
+
+if ($currentMemoryPerAdd -ne '0' -or $currentFailureThreshold -ne '0' -or $currentMemoryCap -ne '640') {
     $revisionSuffix = "r-$([DateTimeOffset]::UtcNow.ToString('yyMMddHHmmss'))-$([Guid]::NewGuid().ToString('N').Substring(0, 4))"
     $expectedRevisionName = "$BackendAppName--$revisionSuffix"
     New-ContainerAppRevisionFromActiveTemplate `
@@ -40,6 +58,7 @@ if ($currentMemoryPerAdd -ne '0') {
         -EnvironmentVariables @{
             DEMO_CART_MEMORY_MB_PER_ADD = '0'
             DEMO_CART_MEMORY_MAX_MB = '640'
+            DEMO_CART_MEMORY_FAILURE_MB = '0'
         }
 
     $revision = Wait-ContainerAppRevision `
@@ -53,26 +72,23 @@ if ($currentMemoryPerAdd -ne '0') {
         -ResourceGroupName $ResourceGroupName `
         -ContainerAppName $BackendAppName `
         -ExpectedRevisionName $previousRevision.name
-    Write-Host 'Retention was already disabled; reusing the healthy active revision.'
+    Write-Host 'Memory injection and controlled failure were already disabled; reusing the healthy active revision.'
 }
-$recoveryStartedAt = [DateTimeOffset]::UtcNow
 
-$fqdn = az containerapp show `
-    --subscription $SubscriptionId `
-    --resource-group $ResourceGroupName `
-    --name $BackendAppName `
-    --query properties.configuration.ingress.fqdn `
-    --output tsv
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($fqdn)) {
-    throw 'Unable to resolve the backend FQDN.'
-}
+$fqdn = Get-ContainerAppFqdn `
+    -SubscriptionId $SubscriptionId `
+    -ResourceGroupName $ResourceGroupName `
+    -ContainerAppName $BackendAppName
+$correlationId = "SYNTH-RECOVERY-$([Guid]::NewGuid().ToString('N'))"
 
 $cartResponse = Invoke-WebRequest `
     -Method Post `
     -Uri "https://$fqdn/api/carts" `
     -ContentType 'application/json' `
+    -Headers @{ 'X-Correlation-ID' = $correlationId } `
     -Body ((New-DemoCartPayload) | ConvertTo-Json -Compress) `
     -MaximumRedirection 0 `
+    -TimeoutSec 15 `
     -SkipHttpErrorCheck
 if ($cartResponse.StatusCode -ne 201) {
     throw "Recovery cart expected HTTP 201 but received $($cartResponse.StatusCode)."
@@ -83,22 +99,26 @@ $addResponse = Invoke-WebRequest `
     -Method Post `
     -Uri "https://$fqdn/api/carts/$($cart.cart.id)/items" `
     -ContentType 'application/json' `
+    -Headers @{ 'X-Correlation-ID' = $correlationId } `
     -Body ((New-DemoAddItemPayload) | ConvertTo-Json -Compress) `
+    -TimeoutSec 15 `
     -SkipHttpErrorCheck
 if ($addResponse.StatusCode -ne 200) {
     throw "Recovery add expected HTTP 200 but received $($addResponse.StatusCode)."
 }
 $add = $addResponse.Content | ConvertFrom-Json
-if ($add.allocationBytes -ne 0) {
-    throw "Recovery add unexpectedly retained $($add.allocationBytes) bytes."
+if ($add.correlationId -ne $correlationId -or [long]$add.allocationBytes -ne 0) {
+    throw 'Recovery add did not preserve correlation ID or unexpectedly retained memory.'
 }
 
 $orderResponse = Invoke-WebRequest `
     -Method Post `
     -Uri "https://$fqdn/api/orders" `
     -ContentType 'application/json' `
+    -Headers @{ 'X-Correlation-ID' = $correlationId } `
     -Body ((New-DemoOrderPayload -CartId $cart.cart.id) | ConvertTo-Json -Compress) `
     -MaximumRedirection 0 `
+    -TimeoutSec 15 `
     -SkipHttpErrorCheck
 if ($orderResponse.StatusCode -ne 201) {
     throw "Recovery order expected HTTP 201 but received $($orderResponse.StatusCode)."
@@ -108,28 +128,25 @@ $order = $orderResponse.Content | ConvertFrom-Json
 $trackingResponse = Invoke-WebRequest `
     -Method Get `
     -Uri "https://$fqdn/api/orders/$($order.order.id)/tracking" `
+    -Headers @{ 'X-Correlation-ID' = $correlationId } `
+    -TimeoutSec 15 `
     -SkipHttpErrorCheck
 if ($trackingResponse.StatusCode -ne 200) {
     throw "Recovery tracking expected HTTP 200 but received $($trackingResponse.StatusCode)."
 }
 
-$threshold = 629145600
-$metricDeadline = (Get-Date).AddSeconds($MetricTimeoutSeconds)
+$alertDeadline = (Get-Date).AddSeconds($AlertTimeoutSeconds)
 do {
-    $maximum = Get-ContainerAppWorkingSetMaximum `
-        -SubscriptionId $SubscriptionId `
-        -ResourceGroupName $ResourceGroupName `
-        -ContainerAppName $BackendAppName `
-        -StartTime $recoveryStartedAt `
-        -Latest
-    if ($null -ne $maximum) {
-        Write-Host "revision=$($revision.name) WorkingSetBytes=$([long]$maximum)"
-        if ($maximum -lt $threshold) {
-            Write-Host "Recovery verified. orderId=$($order.order.id) correlationId=$($add.correlationId)"
-            return
-        }
+    $fired = @(Get-FiredContainerAppAlert `
+            -SubscriptionId $SubscriptionId `
+            -AlertRuleId $alertRuleId `
+            -TargetResourceId $backendResourceId `
+            -StartTime ([DateTimeOffset]::MinValue))
+    if ($fired.Count -eq 0) {
+        Write-Host "Recovery verified. revision=$($revision.name) orderId=$($order.order.id) correlationId=$correlationId"
+        return
     }
     Start-Sleep -Seconds 15
-} while ((Get-Date) -lt $metricDeadline)
+} while ((Get-Date) -lt $alertDeadline)
 
-Write-Warning "Healthy recovery flow passed on new revision '$($revision.name)', but a below-threshold metric sample was not available within $MetricTimeoutSeconds seconds."
+Write-Warning "Healthy cart-to-tracking recovery passed on '$($revision.name)', but Azure Monitor still reports the exact 5xx alert Fired after $AlertTimeoutSeconds seconds. Do not inject another incident until it resolves."

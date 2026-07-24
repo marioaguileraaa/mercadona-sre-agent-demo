@@ -79,6 +79,44 @@ public sealed class RetailFlowTests : IClassFixture<WebApplicationFactory<Progra
     }
 
     [Fact]
+    public async Task CapacityFailureReturns503AndDoesNotMutateCart()
+    {
+        var retention = CreateRetention(10, 20, 10);
+        using var app = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<CartMemoryRetentionService>();
+                services.AddSingleton(retention);
+            });
+        });
+        using var client = app.CreateClient();
+        var cartId = await CreateCart(client);
+
+        var successful = await client.PostAsJsonAsync(
+            $"/api/carts/{cartId}/items",
+            new AddCartItemRequest("product-apples", 1));
+        Assert.Equal(HttpStatusCode.OK, successful.StatusCode);
+
+        using var failedRequest = new HttpRequestMessage(HttpMethod.Post, $"/api/carts/{cartId}/items")
+        {
+            Content = JsonContent.Create(new AddCartItemRequest("product-apples", 1))
+        };
+        failedRequest.Headers.Add("X-Correlation-ID", "CORR-CAPACITY-TEST");
+        var failed = await client.SendAsync(failedRequest);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, failed.StatusCode);
+        var failedJson = await ReadJson(failed);
+        Assert.Equal("DEMO_CART_MEMORY_CAPACITY_EXHAUSTED", failedJson.GetProperty("errorCode").GetString());
+        Assert.Equal("CORR-CAPACITY-TEST", failedJson.GetProperty("correlationId").GetString());
+        Assert.Equal(10L * 1024 * 1024, failedJson.GetProperty("retainedBytes").GetInt64());
+
+        var cartResponse = await client.GetAsync($"/api/carts/{cartId}");
+        var cartJson = await ReadJson(cartResponse);
+        Assert.Equal(1, cartJson.GetProperty("cart").GetProperty("items")[0].GetProperty("quantity").GetInt32());
+    }
+
+    [Fact]
     public async Task CorrelationIdIsPropagated()
     {
         using var client = _factory.CreateClient();
@@ -122,12 +160,13 @@ public sealed class RetailFlowTests : IClassFixture<WebApplicationFactory<Progra
     private static async Task<JsonElement> ReadJson(HttpResponseMessage response) =>
         JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
 
-    private static CartMemoryRetentionService CreateRetention(int perAddMb, int maxMb) =>
+    private static CartMemoryRetentionService CreateRetention(int perAddMb, int maxMb, int failureMb = 0) =>
         new(
             Microsoft.Extensions.Options.Options.Create(new CartMemoryRetentionOptions
             {
                 MegabytesPerValidAdd = perAddMb,
-                MaxRetainedMegabytes = maxMb
+                MaxRetainedMegabytes = maxMb,
+                FailureThresholdMegabytes = failureMb
             }),
             NullLogger<CartMemoryRetentionService>.Instance);
 }

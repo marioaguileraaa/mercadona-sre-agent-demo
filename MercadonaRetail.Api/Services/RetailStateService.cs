@@ -70,6 +70,25 @@ public sealed class RetailStateService(CartMemoryRetentionService memoryRetentio
                 {
                     return AddItemResult.Failure("INVALID_QUANTITY");
                 }
+            }
+
+            var retention = memoryRetention.RetainAfterValidAdd(
+                correlationId,
+                cart.Id,
+                cart.StoreId,
+                product.Id,
+                quantity);
+            if (retention.IsCapacityExhausted)
+            {
+                return AddItemResult.Failure(
+                    CartMemoryRetentionService.CapacityErrorCode,
+                    retention.RetainedBytes,
+                    retention.MaxRetainedBytes);
+            }
+
+            if (existingIndex >= 0)
+            {
+                var existing = cart.Items[existingIndex];
                 cart.Items[existingIndex] = existing with { Quantity = existing.Quantity + quantity };
             }
             else
@@ -77,17 +96,11 @@ public sealed class RetailStateService(CartMemoryRetentionService memoryRetentio
                 cart.Items.Add(new CartItem(product.Id, product.Name, quantity, product.Price));
             }
 
-            var allocationBytes = memoryRetention.RetainAfterValidAdd(
-                correlationId,
-                cart.Id,
-                cart.StoreId,
-                product.Id,
-                quantity);
             return AddItemResult.Success(
                 SnapshotCartUnsafe(cart),
-                allocationBytes,
-                memoryRetention.RetainedBytes,
-                memoryRetention.MaxRetainedBytes);
+                retention.AllocationBytes,
+                retention.RetainedBytes,
+                retention.MaxRetainedBytes);
         }
     }
 
@@ -164,7 +177,11 @@ public sealed record AddItemResult(
     long RetainedBytes,
     long MaxRetainedBytes)
 {
-    public static AddItemResult Failure(string errorCode) => new(false, errorCode, null, 0, 0, 0);
+    public static AddItemResult Failure(
+        string errorCode,
+        long retainedBytes = 0,
+        long maxRetainedBytes = 0) =>
+        new(false, errorCode, null, 0, retainedBytes, maxRetainedBytes);
 
     public static AddItemResult Success(Cart cart, long allocationBytes, long retainedBytes, long maxRetainedBytes) =>
         new(true, null, cart, allocationBytes, retainedBytes, maxRetainedBytes);

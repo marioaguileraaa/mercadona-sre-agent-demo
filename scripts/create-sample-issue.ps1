@@ -4,17 +4,20 @@ param(
     [string] $Repository = 'marioaguileraaa/mercadona-sre-agent-demo'
 )
 
-$title = '[SYNTHETIC] Mercadona cart memory working set exceeds 600 MiB'
+$title = '[SYNTHETIC] Retail cart API returns controlled memory-capacity 503 responses'
 $body = @'
 ## Synthetic incident
 
-The fictional Mercadona-style retail demo shows rising `WorkingSetBytes` after valid cart additions while normal API responses continue. Structured logs use `DEMO_CART_MEMORY_RETENTION`.
+Fictional technical SRE demo. Not an official Mercadona system. All stores, products, prices, carts, orders, correlation IDs and metrics are synthetic; no claims about real operations.
+
+The fictional retail demo shows six HTTP 503 responses after valid cart additions reach the controlled 600 MiB threshold. Structured logs use `DEMO_CART_MEMORY_RETENTION` and `DEMO_CART_MEMORY_CAPACITY_EXHAUSTED`; the platform signal is `Requests` filtered to `statusCodeCategory=5xx`.
 
 ## Safety
 
 - Synthetic data only
 - No real customer, financial, personal or operational data
 - Review-mode investigation; mitigation requires approval
+- No automatic merge or deployment
 '@
 
 if ($PSCmdlet.ShouldProcess($Repository, 'Create controlled synthetic incident issue')) {

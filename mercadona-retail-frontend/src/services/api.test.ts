@@ -38,4 +38,24 @@ describe('retailApi', () => {
       expect.objectContaining({ method: 'POST' }),
     );
   });
+
+  test('preserves structured cart capacity errors', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        message: 'Synthetic capacity reached.',
+        errorCode: 'DEMO_CART_MEMORY_CAPACITY_EXHAUSTED',
+        correlationId: 'CORR-503',
+      }),
+    } as Response);
+
+    await expect(retailApi.addCartItem('CART-1', 'product-apples', 1)).rejects.toMatchObject({
+      status: 503,
+      details: {
+        errorCode: 'DEMO_CART_MEMORY_CAPACITY_EXHAUSTED',
+        correlationId: 'CORR-503',
+      },
+    });
+  });
 });

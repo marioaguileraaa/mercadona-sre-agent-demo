@@ -1,17 +1,21 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import App from './App';
-import { retailApi } from './services/api';
+import { ApiError, retailApi } from './services/api';
 
-jest.mock('./services/api', () => ({
-  retailApi: {
-    getStores: jest.fn(),
-    getProducts: jest.fn(),
-    createCart: jest.fn(),
-    addCartItem: jest.fn(),
-    createOrder: jest.fn(),
-    getTracking: jest.fn(),
-  },
-}));
+jest.mock('./services/api', () => {
+  const actual = jest.requireActual('./services/api');
+  return {
+    ...actual,
+    retailApi: {
+      getStores: jest.fn(),
+      getProducts: jest.fn(),
+      createCart: jest.fn(),
+      addCartItem: jest.fn(),
+      createOrder: jest.fn(),
+      getTracking: jest.fn(),
+    },
+  };
+});
 
 const store = {
   id: 'store-river',
@@ -50,6 +54,19 @@ const cartWithItem = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: jest.fn().mockReturnValue({
+      matches: false,
+      media: '',
+      onchange: null,
+      addListener: jest.fn(),
+      removeListener: jest.fn(),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    }),
+  });
   (retailApi.getStores as jest.Mock).mockResolvedValue([store]);
   (retailApi.getProducts as jest.Mock).mockResolvedValue([product]);
   (retailApi.createCart as jest.Mock).mockResolvedValue({
@@ -62,7 +79,7 @@ test('renders the original Mercado Verde identity and persistent synthetic discl
   render(<App />);
 
   expect(await screen.findByRole('button', { name: 'Mercado Verde, ir al inicio' })).toBeInTheDocument();
-  expect(screen.queryByText(/Fictional technical SRE demo/)).not.toBeInTheDocument();
+  expect(screen.getAllByText(/Fictional technical SRE demo/)).toHaveLength(2);
   expect(screen.getAllByText(/Demo técnica SRE ficticia/)).toHaveLength(2);
   expect(screen.getAllByText(/No es un sistema oficial de Mercadona/)).toHaveLength(2);
   expect(screen.getByRole('heading', { name: /Lo cotidiano/ })).toBeInTheDocument();
@@ -184,4 +201,22 @@ test('shows a recoverable error when synthetic stores cannot load', async () => 
 
   await waitFor(() => expect(retailApi.getStores).toHaveBeenCalledTimes(2));
   expect(await screen.findByText(store.name)).toBeInTheDocument();
+});
+
+test('shows a clear capacity error with its synthetic correlation ID', async () => {
+  (retailApi.addCartItem as jest.Mock).mockRejectedValueOnce(new ApiError(
+    'capacity',
+    503,
+    {
+      errorCode: 'DEMO_CART_MEMORY_CAPACITY_EXHAUSTED',
+      correlationId: 'CORR-CAPACITY-UI',
+    },
+  ));
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Comprar aquí' }));
+  fireEvent.click(await screen.findByRole('button', { name: `Añadir ${product.name} al carrito` }));
+
+  expect(await screen.findByText(/El carrito alcanzó el límite seguro de memoria de la demo/)).toBeInTheDocument();
+  expect(screen.getByText(/CORR-CAPACITY-UI/)).toBeInTheDocument();
 });

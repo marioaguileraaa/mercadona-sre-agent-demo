@@ -66,3 +66,12 @@ export interface TrackingResponse {
   tracking: Tracking;
   correlationId: string;
 }
+
+export interface ApiErrorDetails {
+  message?: string;
+  errorCode?: string;
+  correlationId?: string;
+  allocationBytes?: number;
+  retainedBytes?: number;
+  maxRetainedBytes?: number;
+}

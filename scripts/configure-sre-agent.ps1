@@ -22,6 +22,11 @@ $triggerBridgeName = 'logic-mercadona-sre-trigger-v1'
 $triggerBridgeDeploymentName = 'mercadona-sre-trigger-bridge'
 $agentResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/agents/$AgentName"
 $agentArmUrl = "https://management.azure.com${agentResourceId}"
+$backendResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/ca-mercadona-retail-api"
+$cartAlertName = 'alert-mercadona-cart-5xx-sev3'
+$cartAlertResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Insights/metricAlerts/$cartAlertName"
+$incidentHandlerName = 'incident-handler'
+$incidentFilterName = 'mercadona-cart-5xx-sev3'
 
 function ConvertFrom-Base64Url {
     param(
@@ -339,7 +344,7 @@ function Get-FirstOptionalPropertyValue {
 function Invoke-AgentApi {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Get', 'Post', 'Put')]
+        [ValidateSet('Delete', 'Get', 'Post', 'Put')]
         [string] $Method,
         [Parameter(Mandatory)]
         [string] $Path,
@@ -443,23 +448,16 @@ $githubDomainIsHealthy = Get-OptionalPropertyValue -InputObject $githubDomain -P
 $domainReady = if ($null -ne $githubDomainIsHealthy) {
     $githubDomainIsHealthy -eq $true
 } else {
-    $null -ne $githubDomain -and $githubDomainStatus -in @('Connected', 'Ready', 'Authenticated', 'Succeeded')
+    # Current domain records can omit status; the platform treats a host record as authenticated.
+    $null -ne $githubDomain -and
+        ($githubDomainStatus -in @('Connected', 'Ready', 'Authenticated', 'Succeeded') -or
+         [string]::IsNullOrWhiteSpace([string]$githubDomainStatus))
 }
-
-if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_PAT)) {
-    Invoke-AgentApi -Method Put -Path '/api/v2/github/domains/github_com' -Body @{
-        AuthType = 'Pat'
-        Pat = $env:GITHUB_PAT
-    } | Out-Null
-    Write-Host 'GitHub PAT submitted to Azure SRE Agent secure domain storage; it was not printed or written to repository/disk.'
-    $domainReady = $true
-} elseif (-not $domainReady) {
-    $oauth = Invoke-AgentApi -Method Get -Path '/api/v2/github/oauth/config' -Body $null
-    Write-Host 'INCOMPLETE: GitHub authentication is required before source indexing.'
-    Write-Host 'Complete OAuth through the Azure SRE Agent portal, then rerun this script.'
-    throw 'INCOMPLETE: no authenticated GitHub domain or GITHUB_PAT was available.'
-} else {
-    Write-Host "Using existing authenticated GitHub domain. Status=$githubDomainStatus"
+if (-not $domainReady) {
+    Invoke-AgentApi -Method Get -Path '/api/v2/github/oauth/config' -Body $null | Out-Null
+    Write-Host 'INCOMPLETE: GitHub OAuth authorization is required before source indexing or issue/PR actions.'
+    Write-Host 'Manual step: Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > Sign in, then rerun this script.'
+    throw 'INCOMPLETE: no authenticated github_com domain was available.'
 }
 
 $repositoryBody = @{
@@ -505,7 +503,7 @@ $existingCloneStatus = @(
 ) | Where-Object { $null -ne $_ } | Select-Object -First 1
 $existingRepositoryBranchMatchesDesired = [string]::IsNullOrWhiteSpace($existingRepositoryBranch) `
     -or $existingRepositoryBranch -eq 'main'
-$repositoryMatchesDesired = $null -ne $existingRepository `
+$repositorySourceMatchesDesired = $null -ne $existingRepository `
     -and $existingRepositoryUrl -eq $RepositoryUrl `
     -and $existingRepositoryBranchMatchesDesired `
     -and $existingRepositoryType -eq 'GitHub'
@@ -513,7 +511,7 @@ $repositoryMatchesDesired = $null -ne $existingRepository `
 if ($null -eq $existingRepository) {
     Invoke-AgentApi -Method Put -Path "/api/v2/repos/$RepositoryName" -Body $repositoryBody | Out-Null
     Write-Host "Created repository '$RepositoryName'."
-} elseif (-not $repositoryMatchesDesired) {
+} elseif (-not $repositorySourceMatchesDesired) {
     throw "Repository '$RepositoryName' already exists with a different URL, type, or branch. Refusing destructive replacement."
 } elseif ($existingCloneStatus -eq 'Ready') {
     Write-Host "Reusing existing Ready repository '$RepositoryName'."
@@ -542,6 +540,35 @@ if ($cloneStatus -ne 'Ready') {
     throw "Repository cloneStatus did not reach Ready within ten minutes. Last status: '$cloneStatus'."
 }
 
+$availableTools = Invoke-AgentApi -Method Get -Path '/api/v2/agent/tools' -Body $null
+$availableToolsJson = $availableTools | ConvertTo-Json -Depth 30 -Compress
+$availableToolNames = @([regex]::Matches(
+        $availableToolsJson,
+        '"(?:name|toolName)"\s*:\s*"([^"]+)"',
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    ) | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+$requiredGitHubCapabilities = [ordered]@{
+    issue = '(?i)^(issue_write|CreateGithubIssue)$'
+    branch = '(?i)^(create_branch|CreateGithubBranch|CreateBranch)$'
+    contents = '(?i)^(push_files|PushGithubFiles|CommitGithubFiles|CreateGithubCommit|PushFiles)$'
+    pullRequest = '(?i)^(create_pull_request|CreateGithubPullRequest|CreatePullRequest)$'
+}
+$selectedGitHubTools = [System.Collections.Generic.List[string]]::new()
+$missingGitHubCapabilities = [System.Collections.Generic.List[string]]::new()
+foreach ($capability in $requiredGitHubCapabilities.GetEnumerator()) {
+    $matchingTool = $availableToolNames | Where-Object { $_ -match $capability.Value } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($matchingTool)) {
+        $missingGitHubCapabilities.Add($capability.Key)
+    } else {
+        $selectedGitHubTools.Add($matchingTool)
+    }
+}
+if ($missingGitHubCapabilities.Count -gt 0) {
+    Write-Host 'INCOMPLETE: the authenticated GitHub connection did not expose every required issue/branch/contents/pull-request capability.'
+    Write-Host 'Manual step: Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > reconnect with issue, contents and pull-request write access, then rerun this script.'
+    throw "INCOMPLETE: missing GitHub capabilities: $($missingGitHubCapabilities -join ', ')."
+}
+
 foreach ($connectorName in @('log-analytics', 'application-insights')) {
     $connector = az rest `
         --method get `
@@ -558,16 +585,65 @@ foreach ($connectorName in @('log-analytics', 'application-insights')) {
     }
 }
 
-$codeAnalyzer = @{
-    name = 'code-analyzer'
+$globalSettings = Invoke-AgentApi -Method Get -Path '/api/v2/agent/settings/global' -Body $null
+$globalPermissions = Get-OptionalPropertyValue -InputObject $globalSettings -PropertyName 'permissions'
+$existingAllow = @(
+    Get-OptionalPropertyValue -InputObject $globalPermissions -PropertyName 'allow'
+) | Where-Object { $null -ne $_ } | ForEach-Object { @($_) }
+if ($existingAllow -contains '*') {
+    throw 'Global tool policy allows all tools and would bypass Review approval. Remove that broad allow before configuring the retail agent.'
+}
+$existingAsk = @(
+    Get-OptionalPropertyValue -InputObject $globalPermissions -PropertyName 'ask'
+) | Where-Object { $null -ne $_ } | ForEach-Object { @($_) }
+$existingDeny = @(
+    Get-OptionalPropertyValue -InputObject $globalPermissions -PropertyName 'deny'
+) | Where-Object { $null -ne $_ } | ForEach-Object { @($_) }
+$requiredAsk = @('RunAzCliWriteCommands') + @($selectedGitHubTools)
+$requiredDeny = @(
+    '*merge*',
+    '*Merge*',
+    '*workflow*',
+    '*Workflow*',
+    '*deploy*',
+    '*Deploy*'
+)
+$toolPolicy = @{
+    permissions = @{
+        allow = @($existingAllow | Select-Object -Unique)
+        ask = @($existingAsk + $requiredAsk | Select-Object -Unique)
+        deny = @($existingDeny + $requiredDeny | Select-Object -Unique)
+    }
+}
+Invoke-AgentApi -Method Put -Path '/api/v2/agent/settings/global' -Body $toolPolicy | Out-Null
+
+$cartAlert = az rest `
+    --method get `
+    --url "https://management.azure.com${cartAlertResourceId}?api-version=2018-03-01" `
+    --output json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or
+    $cartAlert.properties.severity -ne 3 -or
+    $cartAlert.properties.scopes.Count -ne 1 -or
+    $cartAlert.properties.scopes[0] -ne $backendResourceId) {
+    throw "Metric alert '$cartAlertName' is not Sev3 or is not scoped exclusively to the retail backend."
+}
+
+$incidentHandler = @{
+    name = $incidentHandlerName
     type = 'ExtendedAgent'
-    tags = @('mercadona-demo', 'synthetic-data')
+    tags = @('mercadona-demo', 'synthetic-data', 'retail-incident')
     owner = ''
     properties = @{
         instructions = @'
-Investigate only the fictional Mercadona-style retail reliability demo. Correlate Azure Container Apps WorkingSetBytes telemetry with structured DEMO_CART_MEMORY_RETENTION logs by CorrelationId, CartId, StoreId, ProductId, AllocationBytes, RetainedBytes, MaxRetainedBytes and RootCauseClue. Identify the active backend revision, inspect the connected main branch, and cite file:line evidence. Treat all stores, products, prices, carts, orders, correlation IDs and metrics as synthetic. In Review mode, propose only the reversible mitigation of setting DEMO_CART_MEMORY_MB_PER_ADD to 0, which creates a fresh revision and removes the retained process heap; never execute a write without explicit approval.
+Investigate only the fictional retail SRE demo in marioaguileraaa/mercadona-sre-agent-demo. Treat every store, product, price, cart, order, correlation ID and metric as synthetic.
+
+First search memory, then correlate Azure Monitor Requests 5xx, Application Insights requests, Log Analytics console events and the active Container Apps revision. Use CorrelationId, CartId, StoreId, ProductId, Quantity, AllocationBytes, RetainedBytes, MaxRetainedBytes, ErrorCode and RootCauseClue. Inspect the connected Ready repository and cite exact file:line evidence. Identify the process-lifetime strong root in CartMemoryRetentionService as the synthetic leak only when evidence supports it.
+
+Remain in Review mode. The only immediate mitigation you may propose is a controlled clean revision with DEMO_CART_MEMORY_MB_PER_ADD=0, DEMO_CART_MEMORY_FAILURE_MB=0 and DEMO_CART_MEMORY_MAX_MB=640. Explain that the new revision restarts the process and releases the retained heap. Never execute this write until the operator explicitly approves it. After approval, verify the healthy cart-to-tracking flow and that no new 5xx is produced.
+
+Only after that approval, create a GitHub issue with Summary, Impact, Timeline, Evidence, Root Cause, Immediate Mitigation, Permanent Fix and Validation. Then create a branch, apply the smallest permanent code fix with tests, push the commit and open a pull request linked to the issue. Use only the authenticated GitHub connector operations (issue_write, create_branch, push_files and create_pull_request). Never use a token, gh CLI or direct GitHub REST call. Never merge a pull request, dispatch a workflow, deploy a revision from the PR or close the issue automatically. If any GitHub capability is unavailable, report INCOMPLETE with the minimal connector step and do not claim success.
 '@
-        handoffDescription = 'Correlate working-set telemetry, retained-byte logs, active revision and repository source for the synthetic cart-memory demo.'
+        handoffDescription = 'Investigate the synthetic retail cart 5xx incident, propose the reviewed clean-revision mitigation, and prepare an issue and unmerged PR after approval.'
         handoffs = @()
         tools = @(
             'SearchMemory',
@@ -575,38 +651,58 @@ Investigate only the fictional Mercadona-style retail reliability demo. Correlat
             'RunAzCliWriteCommands',
             'GetAzCliHelp',
             'QueryLogAnalyticsByWorkspaceId',
+            'QueryAppInsightsByResourceId',
             'ExecutePythonCode',
             'FindConnectedGitHubRepo'
-        )
+        ) + @($selectedGitHubTools)
         mcpTools = @()
         allowParallelToolCalls = $true
         enableSkills = $true
     }
 }
-Invoke-AgentApi -Method Put -Path '/api/v2/extendedAgent/agents/code-analyzer' -Body $codeAnalyzer | Out-Null
+Invoke-AgentApi -Method Put -Path "/api/v2/extendedAgent/agents/$incidentHandlerName" -Body $incidentHandler | Out-Null
 
 $incidentFilter = @{
-    name = 'mercadona-cart-memory-sev2'
+    name = $incidentFilterName
     type = 'IncidentFilter'
     tags = @('mercadona-demo')
     properties = @{
         incidentPlatform = 'AzMonitor'
         isEnabled = $true
-        priorities = @('Sev2')
-        titleContains = 'mercadona'
-        handlingAgent = 'code-analyzer'
+        priorities = @('Sev3')
+        alertId = $cartAlertResourceId
+        titleContains = $cartAlertName
+        azMonitorFilterSettings = @{
+            targetResourceType = 'Microsoft.App/containerApps'
+            targetResource = $backendResourceId
+        }
+        handlingAgent = $incidentHandlerName
         agentMode = 'Review'
         deepInvestigationEnabled = $true
         maxAutomatedInvestigationAttempts = 3
+        mergeEnabled = $false
     }
 }
-Invoke-AgentApi -Method Put -Path '/api/v2/extendedAgent/incidentFilters/mercadona-cart-memory-sev2' -Body $incidentFilter | Out-Null
+Invoke-AgentApi -Method Put -Path "/api/v2/extendedAgent/incidentFilters/$incidentFilterName" -Body $incidentFilter | Out-Null
+
+$configuredFiltersResponse = Invoke-AgentApi -Method Get -Path '/api/v2/extendedAgent/incidentFilters' -Body $null
+$configuredFilters = Get-ResponseItems -Response $configuredFiltersResponse -PropertyNames @('value', 'values', 'incidentFilters', 'items')
+$filtersToRemove = @('mercadona-cart-memory-sev2', 'quickstart_response_plan', 'quickstart_handler')
+foreach ($filterName in $filtersToRemove) {
+    $existingFilter = $configuredFilters | Where-Object {
+        (Get-FirstOptionalPropertyValue -InputObject $_ -PropertyNames @('name')) -eq $filterName
+    } | Select-Object -First 1
+    if ($null -ne $existingFilter) {
+        Invoke-AgentApi -Method Delete -Path "/api/v2/extendedAgent/incidentFilters/$filterName" -Body $null | Out-Null
+        Write-Host "Removed competing response plan '$filterName'."
+    }
+}
 
 $triggerPayload = @{
     name = $triggerName
     description = 'Investigate a controlled synthetic incident from GitHub.'
-    agentPrompt = 'Analyze the supplied synthetic cart-memory incident using WorkingSetBytes, retained-byte logs, the active revision and the connected repository. Return evidence and only the Review-mode mitigation proposal DEMO_CART_MEMORY_MB_PER_ADD=0.'
-    agent = 'code-analyzer'
+    agentPrompt = 'Analyze the supplied synthetic retail cart 5xx incident using Requests, Application Insights, retained-byte logs, the active revision and the connected repository. Return evidence and only the Review-mode clean-revision mitigation proposal with both demo memory variables set to 0.'
+    agent = $incidentHandlerName
     agentMode = 'Review'
 }
 $triggerListResponse = Invoke-AgentApi -Method Get -Path '/api/v1/httptriggers' -Body $null
@@ -644,9 +740,9 @@ $configuredTriggerMode = Get-FirstOptionalPropertyValue -InputObject $configured
 $configuredTriggerAgent = Get-FirstOptionalPropertyValue -InputObject $configuredTrigger -PropertyNames @('agent')
 $configuredTriggerPrompt = Get-FirstOptionalPropertyValue -InputObject $configuredTrigger -PropertyNames @('agentPrompt')
 if ($configuredTriggerMode -ne 'Review' -or
-    $configuredTriggerAgent -ne 'code-analyzer' -or
+    $configuredTriggerAgent -ne $incidentHandlerName -or
     [string]::IsNullOrWhiteSpace($configuredTriggerPrompt)) {
-    throw 'HTTP trigger verification did not preserve Review mode, code-analyzer, and agentPrompt.'
+    throw 'HTTP trigger verification did not preserve Review mode, incident-handler, and agentPrompt.'
 }
 
 $triggerProperties = Get-OptionalPropertyValue -InputObject $trigger -PropertyName 'properties'
@@ -800,8 +896,8 @@ $verifiedCloneStatus = @(
 if ($verifiedCloneStatus -ne 'Ready') {
     throw 'Repository is not Ready after configuration.'
 }
-$verifiedSubagent = Invoke-AgentApi -Method Get -Path '/api/v2/extendedAgent/agents/code-analyzer' -Body $null
-$verifiedFilter = Invoke-AgentApi -Method Get -Path '/api/v2/extendedAgent/incidentFilters/mercadona-cart-memory-sev2' -Body $null
+$verifiedSubagent = Invoke-AgentApi -Method Get -Path "/api/v2/extendedAgent/agents/$incidentHandlerName" -Body $null
+$verifiedFilter = Invoke-AgentApi -Method Get -Path "/api/v2/extendedAgent/incidentFilters/$incidentFilterName" -Body $null
 $verifiedTriggersResponse = Invoke-AgentApi -Method Get -Path '/api/v1/httptriggers' -Body $null
 $verifiedTriggers = Get-ResponseItems -Response $verifiedTriggersResponse -PropertyNames @('value', 'values', 'triggers', 'items')
 $verifiedTrigger = $verifiedTriggers | Where-Object {
@@ -818,9 +914,9 @@ $verifiedTriggerMode = Get-FirstOptionalPropertyValue -InputObject $verifiedTrig
 $verifiedTriggerAgent = Get-FirstOptionalPropertyValue -InputObject $verifiedTrigger -PropertyNames @('agent')
 $verifiedTriggerPrompt = Get-FirstOptionalPropertyValue -InputObject $verifiedTrigger -PropertyNames @('agentPrompt')
 if ($verifiedTriggerMode -ne 'Review' -or
-    $verifiedTriggerAgent -ne 'code-analyzer' -or
+    $verifiedTriggerAgent -ne $incidentHandlerName -or
     [string]::IsNullOrWhiteSpace($verifiedTriggerPrompt)) {
-    throw 'HTTP trigger did not preserve agentMode=Review, agent=code-analyzer, and agentPrompt.'
+    throw 'HTTP trigger did not preserve agentMode=Review, agent=incident-handler, and agentPrompt.'
 }
 
 $verifiedTriggerBridge = az rest `
@@ -838,4 +934,4 @@ if ($verifiedTriggerBridgePrincipalId -ne $triggerBridgePrincipalId -or $verifie
     throw 'Final Logic App trigger bridge identity or state verification failed.'
 }
 
-Write-Host "SRE Agent configuration verified: repo=Ready, connectors=UAMI, bridge=MSI/StandardUser, incident=AzMonitor, mode=Review, access=Low, monthlyLimit=$MonthlyAgentUnitLimit."
+Write-Host "SRE Agent configuration verified: repo=Ready, GitHub=OAuth/domain+issue/branch/contents/PR, handler=incident-handler, responsePlan=$incidentFilterName, bridge=MSI/StandardUser, incident=AzMonitor, mode=Review, access=Low, monthlyLimit=$MonthlyAgentUnitLimit."

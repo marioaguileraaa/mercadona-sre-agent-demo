@@ -10,6 +10,7 @@ builder.Logging.AddJsonConsole();
 
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
+builder.Services.AddApplicationInsightsTelemetry();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
@@ -25,6 +26,8 @@ builder.Services
             ?? builder.Configuration.GetValue<int>("Demo:CartMemoryMegabytesPerAdd");
         options.MaxRetainedMegabytes = builder.Configuration.GetValue<int?>("DEMO_CART_MEMORY_MAX_MB")
             ?? builder.Configuration.GetValue<int>("Demo:CartMemoryMaxMegabytes");
+        options.FailureThresholdMegabytes = builder.Configuration.GetValue<int?>("DEMO_CART_MEMORY_FAILURE_MB")
+            ?? builder.Configuration.GetValue<int>("Demo:CartMemoryFailureMegabytes");
     })
     .ValidateOnStart();
 builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<CartMemoryRetentionOptions>, CartMemoryRetentionOptionsValidator>();

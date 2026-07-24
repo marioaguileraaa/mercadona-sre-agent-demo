@@ -2,18 +2,11 @@
 
 > **Fictional technical SRE demo. Not an official Mercadona system. All stores, products, prices, carts, orders, correlation IDs and metrics are synthetic; no claims about real operations.**
 
-Esta guía prepara una demostración controlada de Azure SRE Agent. No se conecta a sistemas reales de Mercadona, no utiliza datos reales ni activos oficiales y no realiza ningún despliegue por sí sola.
+Esta guía no se conecta a sistemas reales, no utiliza datos ni activos oficiales y no ejecuta nada por sí sola.
 
 ## 1. Preparación
 
-Comprueba:
-
-- PowerShell 7.2 o superior;
-- Azure CLI autenticado;
-- suscripción exacta `5305e853-a63b-4b82-9a3f-6fde18c1a798`;
-- resource group preexistente `rg-mercadona-sre-agent-v1`;
-- .NET 9, Node.js 22, Bicep y GitHub CLI para validación/configuración;
-- autorización del propietario para desplegar y generar costes.
+Requisitos: PowerShell 7.2+, Azure CLI, .NET 9, Node.js 22, Bicep, GitHub CLI, suscripción `5305e853-a63b-4b82-9a3f-6fde18c1a798`, resource group preexistente `rg-mercadona-sre-agent-v1` y autorización del propietario.
 
 ```powershell
 az account set --subscription 5305e853-a63b-4b82-9a3f-6fde18c1a798
@@ -29,121 +22,91 @@ sequenceDiagram
   participant A as API
   participant M as Azure Monitor
   participant S as Azure SRE Agent
-  O->>W: Flujo tienda/producto/cesta
-  W->>A: /api same-origin
-  A-->>M: Logs JSON + WorkingSetBytes
-  M-->>S: Alerta Sev2
-  S-->>O: Investigación y propuesta en Review
-  O->>A: Aprueba solo desactivar retención
+  participant G as GitHub
+  O->>W: Tienda -> producto -> cesta
+  W->>A: POST /api/carts/{cartId}/items
+  A-->>M: 6 respuestas 503 + telemetría
+  M-->>S: Requests 5xx Sev3
+  S-->>O: Evidencia y revisión limpia propuesta
+  O->>S: Aprobación explícita
+  S->>A: Revisión con variables a cero
+  S->>G: Issue + rama/commit + PR
+  Note over S,G: Sin merge ni deploy
 ```
 
-## 3. Despliegue controlado
+## 3. Despliegue y configuración
 
 ```powershell
 .\scripts\deploy.ps1
-```
-
-El script exige el contexto exacto, usa el resource group existente, ejecuta dos pasadas Bicep, compila imágenes remotas en ACR con tags inmutables y valida salud, tienda, cesta, alta de producto, pedido, seguimiento, frontend y proxy same-origin.
-
-Configura después el agente:
-
-```powershell
 .\scripts\configure-sre-agent.ps1 -SetGitHubSecret
 ```
 
-Resultado esperado: agente `sre-agent-mercadona-v1` en `Review/Low`, límite mensual 1000, conectores LAW/App Insights con `id-mercadona-sre-v1`, repositorio listo, subagente `code-analyzer`, filtro `mercadona-cart-memory-sev2`, trigger `mercadona-controlled-issue` y puente seguro.
+La primera configuración puede detenerse con `INCOMPLETE`. En ese caso realiza solo **Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > Sign in**, habilita issue/contents/pull-request writes y vuelve a ejecutar. No copies tokens.
 
-## 4. Línea base
-
-Antes del incidente:
+Resultado esperado: `sre-agent-mercadona-v1` en Review/Low; LAW, App Insights, conector GitHub autenticado (dominio en la API actual) y CodeRepo Ready; herramientas GitHub issue/branch/contents/PR; `incident-handler`; response plan `mercadona-cart-5xx-sev3` por alertId/título/recurso; quickstart competidor ausente; puente MSI seguro.
 
 ```powershell
-$id = "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourceGroups/rg-mercadona-sre-agent-v1/providers/Microsoft.App/containerApps/ca-mercadona-retail-api"
-az monitor metrics list --resource $id --metric WorkingSetBytes --aggregation Maximum --interval PT1M
+.\scripts\verify-sre-agent.ps1
 ```
 
-No continúes si la línea base está cerca de 600 MiB.
+## 4. Línea base e incidente
 
-## 5. Iniciar incidente
+`start-incident.ps1` verifica por sí mismo la línea base: revisión única sana, variables a cero, alta HTTP 200 sin reserva, cero 5xx recientes, alerta no Fired y configuración SRE completa.
 
 ```powershell
 .\scripts\start-incident.ps1
 ```
 
-El script crea una revisión nueva con 10 MiB por alta válida, una única cesta y 64 altas secuenciales correctas. Cada alta devuelve HTTP 200 y correlation ID. La colección queda limitada a 640 MiB. El script espera hasta observar más de 600 MiB.
+La revisión incidente usa 10 MiB por alta, umbral controlado 600 MiB y cap 640 MiB. La carga es secuencial y finita: máximo 80 peticiones o cinco minutos. Tras 60 altas con reserva, las siguientes devuelven HTTP 503 real sin reservar ni mutar la cesta. El inyector se detiene al confirmar seis 5xx.
 
-Tiempo habitual: 3-10 minutos, dependiendo de la publicación de métricas.
+Después espera `Requests 5xx > 5`, la alerta exacta Sev3 Fired y un thread nuevo. No recupera automáticamente.
 
-## 6. Observar
+## 5. Observar
 
 ```kusto
 ContainerAppConsoleLogs_CL
 | where ContainerAppName_s == "ca-mercadona-retail-api"
-| where Log_s has "DEMO_CART_MEMORY_RETENTION"
+| where Log_s has_any ("DEMO_CART_MEMORY_RETENTION", "DEMO_CART_MEMORY_CAPACITY_EXHAUSTED")
 | project TimeGenerated, RevisionName_s, Log_s
 | order by TimeGenerated desc
 ```
 
-Busca `AllocationBytes=10485760`, `RetainedBytes`, la misma revisión activa y la pista ficticia de colección sin expulsión. Correlaciona después con `WorkingSetBytes`.
+Busca `AllocationBytes=10485760`, crecimiento de `RetainedBytes` hasta 600 MiB, luego `AllocationBytes=0`, `ErrorCode=DEMO_CART_MEMORY_CAPACITY_EXHAUSTED` y el mismo correlation ID que el 503.
 
-## 7. Investigación y aprobación
+## 6. Investigación, aprobación, issue y PR
 
-Azure SRE Agent debe:
+El agente debe:
 
-1. resumir el impacto sintético;
-2. correlacionar métrica, logs, revisión y repositorio;
-3. citar evidencia de archivo/línea;
-4. proponer únicamente `DEMO_CART_MEMORY_MB_PER_ADD=0`;
-5. esperar aprobación humana antes de escribir.
+1. consultar memoria, Azure Monitor, App Insights, Log Analytics y código;
+2. citar la raíz fuerte en archivo/línea;
+3. proponer solo una revisión limpia con per-add y failure a cero;
+4. esperar aprobación explícita;
+5. verificar el flujo sano;
+6. crear issue, rama/commit y PR con fix permanente;
+7. dejar el PR sin mergear y sin desplegar.
 
-Rechaza cualquier propuesta que cambie escalado, límite, alerta, RBAC o código.
+Rechaza cambios de escalado, cap, RBAC, merge, workflow dispatch o deploy.
 
-## 8. Fallback de GitHub
-
-Si la alerta tarda demasiado:
-
-1. abre Actions -> **SRE Agent controlled investigation**;
-2. ejecuta manualmente con un ID como `SYNTH-DEMO-001`;
-3. comprueba HTTP 202, `success=true` y `threadId`.
-
-También se puede ejecutar:
-
-```powershell
-.\scripts\create-sample-issue.ps1
-```
-
-El workflow solo reacciona a un título `[SYNTHETIC]` con la etiqueta exacta `sre-investigate`. Este fallback no elimina la frontera Review.
-
-## 9. Recuperación obligatoria
+## 7. Recuperación de emergencia
 
 ```powershell
 .\scripts\recover-incident.ps1
 ```
 
-Si la retención está activa, se crea una revisión nueva con retención desactivada; si ya está en `0`, se reutiliza la revisión sana. El script valida cesta, alta, pedido y seguimiento, comprueba `AllocationBytes=0` y busca una muestra inferior al umbral.
+El script es idempotente. Crea una revisión limpia solo si es necesario, valida cesta/alta/pedido/seguimiento y espera la resolución de la alerta exacta. Si Azure Monitor tarda, emite warning y mantiene la demo desactivada.
 
-## 10. Costes y limpieza
+## 8. Fallback y limpieza
 
-La demo puede generar costes de Container Apps, ACR, Log Analytics, Application Insights, Azure Monitor, Logic Apps y unidades de Azure SRE Agent.
+El workflow manual solo acepta un ID `SYNTH-`, o un issue `[SYNTHETIC]` con etiqueta `sre-investigate`. Usa el único secreto `SRE_TRIGGER_URL` y el puente Logic App con identidad administrada. No elimina la frontera Review.
 
 Checklist final:
 
 1. recuperación ejecutada;
-2. revisión nueva `Healthy/Running`;
-3. variable de memoria por alta a cero;
-4. métrica por debajo de 600 MiB;
+2. revisión `Healthy/Running`;
+3. `DEMO_CART_MEMORY_MB_PER_ADD=0` y `DEMO_CART_MEMORY_FAILURE_MB=0`;
+4. flujo retail sano y sin nuevos 5xx;
 5. alerta resuelta;
-6. issues y threads sintéticos cerrados;
-7. secreto `SRE_TRIGGER_URL` retirado al desmontar;
-8. recursos con `purpose=sre-agent-demo` eliminados solo con aprobación.
-
-## 11. Problemas frecuentes
-
-| Síntoma | Acción |
-|---|---|
-| Guard de contexto falla | no lo eludas; corrige cuenta/suscripción/resource group |
-| Revisión no está sana | no generes carga; revisa eventos y logs |
-| Las altas no devuelven 200 | detén y recupera |
-| La métrica tarda | usa el fallback manual y recupera después |
-| Workflow no devuelve 202 | revisa Logic App y rol Standard User al scope exacto |
-| El agente sugiere otra acción | rechaza; solo se permite poner la variable a cero |
+6. issue/PR/thread sintéticos revisados;
+7. PR sin merge ni deploy;
+8. `SRE_TRIGGER_URL` retirado al desmontar;
+9. recursos dedicados eliminados solo con aprobación.

@@ -60,6 +60,26 @@ Assert-Equal `
     -Expected 0 `
     -Case 'Null metric response'
 
+$requestMetric = @'
+{
+  "value": [
+    {
+      "timeseries": [
+        {
+          "data": [
+            { "timeStamp": "2026-07-13T13:20:00Z", "total": 2 },
+            { "timeStamp": "2026-07-13T13:21:00Z", "total": 4 }
+          ]
+        }
+      ]
+    }
+  ]
+}
+'@ | ConvertFrom-Json
+$totalSamples = @(Get-MetricTotalSamples -Metric $requestMetric)
+Assert-Equal -Actual $totalSamples.Count -Expected 2 -Case '5xx total sample count'
+Assert-Equal -Actual (($totalSamples.total | Measure-Object -Sum).Sum) -Expected 6 -Case '5xx total sum'
+
 $commonSource = Get-Content -LiteralPath "$PSScriptRoot\AzureDemo.Common.ps1" -Raw
 $startSource = Get-Content -LiteralPath "$PSScriptRoot\start-incident.ps1" -Raw
 $recoverySource = Get-Content -LiteralPath "$PSScriptRoot\recover-incident.ps1" -Raw
@@ -70,7 +90,8 @@ foreach ($source in @($startSource, $recoverySource)) {
             'New-ContainerAppRevisionFromActiveTemplate',
             '-SourceRevisionName $previousRevision.name',
             '-RevisionSuffix $revisionSuffix',
-            '-ExpectedRevisionName'
+            '-ExpectedRevisionName',
+            'DEMO_CART_MEMORY_FAILURE_MB'
         )) {
         if (-not $source.Contains($requiredContract, [StringComparison]::Ordinal)) {
             throw "Incident lifecycle script did not preserve '$requiredContract'."
@@ -86,6 +107,9 @@ if (-not $commonSource.Contains('--all', [StringComparison]::Ordinal) -or
 if (-not $commonSource.Contains('function Assert-ContainerAppSingleReadyRevision', [StringComparison]::Ordinal) -or
     -not $recoverySource.Contains('Assert-ContainerAppSingleReadyRevision', [StringComparison]::Ordinal)) {
     throw 'Idempotent recovery no longer validates Single mode and the latest ready revision.'
+}
+if (-not $commonSource.Contains('Authorization = "Bearer $token"', [StringComparison]::Ordinal)) {
+    throw 'SRE Agent data-plane reads do not use the acquired bearer token.'
 }
 if ($recoverySource.Contains("-notin @('0', '10')", [StringComparison]::Ordinal)) {
     throw 'Recovery still rejects supported nonzero retention settings.'

@@ -419,3 +419,231 @@ function Get-ContainerAppWorkingSetMaximum {
     }
     return [double](($samples.maximum | Measure-Object -Maximum).Maximum)
 }
+
+function Get-MetricTotalSamples {
+    param(
+        [AllowNull()]
+        [object] $Metric
+    )
+
+    if ($null -eq $Metric) {
+        return
+    }
+
+    $valueProperty = $Metric.PSObject.Properties['value']
+    if ($null -eq $valueProperty -or $null -eq $valueProperty.Value) {
+        return
+    }
+
+    foreach ($metricValue in @($valueProperty.Value)) {
+        $timeseriesProperty = if ($null -ne $metricValue) {
+            $metricValue.PSObject.Properties['timeseries']
+        } else {
+            $null
+        }
+        if ($null -eq $timeseriesProperty -or $null -eq $timeseriesProperty.Value) {
+            continue
+        }
+
+        foreach ($timeseries in @($timeseriesProperty.Value)) {
+            $dataProperty = if ($null -ne $timeseries) {
+                $timeseries.PSObject.Properties['data']
+            } else {
+                $null
+            }
+            if ($null -eq $dataProperty -or $null -eq $dataProperty.Value) {
+                continue
+            }
+
+            foreach ($sample in @($dataProperty.Value)) {
+                $totalProperty = if ($null -ne $sample) {
+                    $sample.PSObject.Properties['total']
+                } else {
+                    $null
+                }
+                if ($null -eq $totalProperty -or $null -eq $totalProperty.Value) {
+                    continue
+                }
+                $timestampProperty = $sample.PSObject.Properties['timeStamp']
+                [PSCustomObject]@{
+                    total = [double] $totalProperty.Value
+                    timeStamp = if ($null -ne $timestampProperty) {
+                        $timestampProperty.Value
+                    } else {
+                        $null
+                    }
+                }
+            }
+        }
+    }
+}
+
+function Get-ContainerAppRequest5xxTotal {
+    param(
+        [Parameter(Mandatory)]
+        [string] $SubscriptionId,
+        [Parameter(Mandatory)]
+        [string] $ResourceGroupName,
+        [Parameter(Mandatory)]
+        [string] $ContainerAppName,
+        [Parameter(Mandatory)]
+        [DateTimeOffset] $StartTime
+    )
+
+    $resourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/$ContainerAppName"
+    $metric = az monitor metrics list `
+        --subscription $SubscriptionId `
+        --resource $resourceId `
+        --metric Requests `
+        --aggregation Total `
+        --filter "statusCodeCategory eq '5xx'" `
+        --interval PT1M `
+        --start-time $StartTime.UtcDateTime.ToString('o') `
+        --output json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to query Requests 5xx for '$ContainerAppName'."
+    }
+
+    $samples = @(Get-MetricTotalSamples -Metric $metric)
+    if ($samples.Count -eq 0) {
+        return 0
+    }
+    return [double](($samples.total | Measure-Object -Sum).Sum)
+}
+
+function Get-FiredContainerAppAlert {
+    param(
+        [Parameter(Mandatory)]
+        [string] $SubscriptionId,
+        [Parameter(Mandatory)]
+        [string] $AlertRuleId,
+        [Parameter(Mandatory)]
+        [string] $TargetResourceId,
+        [Parameter(Mandatory)]
+        [DateTimeOffset] $StartTime
+    )
+
+    $encodedTarget = [Uri]::EscapeDataString($TargetResourceId)
+    $alerts = az rest `
+        --method get `
+        --url "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.AlertsManagement/alerts?api-version=2019-03-01&targetResource=$encodedTarget" `
+        --output json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to query Azure Alerts Management.'
+    }
+
+    $alertRuleName = ($AlertRuleId -split '/')[-1]
+    $targetResourceName = ($TargetResourceId -split '/')[-1]
+    return @($alerts.value | Where-Object {
+            $essentials = $_.properties.essentials
+            if ($null -eq $essentials) {
+                return $false
+            }
+            $ruleMatches = $essentials.alertRule -eq $AlertRuleId -or $essentials.alertRule -eq $alertRuleName
+            $targetMatches = $essentials.targetResource -eq $TargetResourceId -or
+                $essentials.targetResourceId -eq $TargetResourceId -or
+                $essentials.targetResource -eq $targetResourceName -or
+                $essentials.targetResourceName -eq $targetResourceName
+            $firedAt = @(
+                $essentials.firedDateTime
+                $essentials.startDateTime
+            ) | Where-Object { $null -ne $_ } | Select-Object -First 1
+            return $ruleMatches -and
+                $targetMatches -and
+                $essentials.monitorCondition -eq 'Fired' -and
+                $null -ne $firedAt -and
+                [DateTimeOffset]$firedAt -ge $StartTime
+        } | Sort-Object {
+            [DateTimeOffset]$_.properties.essentials.startDateTime
+        } -Descending | Select-Object -First 1)
+}
+
+function Get-ContainerAppFqdn {
+    param(
+        [Parameter(Mandatory)]
+        [string] $SubscriptionId,
+        [Parameter(Mandatory)]
+        [string] $ResourceGroupName,
+        [Parameter(Mandatory)]
+        [string] $ContainerAppName
+    )
+
+    $fqdn = az containerapp show `
+        --subscription $SubscriptionId `
+        --resource-group $ResourceGroupName `
+        --name $ContainerAppName `
+        --query properties.configuration.ingress.fqdn `
+        --output tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($fqdn)) {
+        throw "Unable to resolve the FQDN for '$ContainerAppName'."
+    }
+    return [string]$fqdn
+}
+
+function Get-SreAgentEndpoint {
+    param(
+        [Parameter(Mandatory)]
+        [string] $SubscriptionId,
+        [Parameter(Mandatory)]
+        [string] $ResourceGroupName,
+        [Parameter(Mandatory)]
+        [string] $AgentName
+    )
+
+    $agentResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.App/agents/$AgentName"
+    $endpoint = az rest `
+        --method get `
+        --url "https://management.azure.com${agentResourceId}?api-version=2025-05-01-preview" `
+        --query properties.agentEndpoint `
+        --output tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($endpoint)) {
+        throw "Unable to resolve the data-plane endpoint for SRE Agent '$AgentName'."
+    }
+    return ([string]$endpoint).TrimEnd('/')
+}
+
+function Invoke-SreAgentRead {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Endpoint,
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $token = $null
+    $headers = $null
+    try {
+        $token = az account get-access-token `
+            --resource 'https://azuresre.dev' `
+            --query accessToken `
+            --output tsv
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
+            throw 'Unable to acquire an Azure SRE Agent data-plane token.'
+        }
+        $headers = @{
+            Authorization = "Bearer $token"
+            Accept = 'application/json'
+        }
+        return Invoke-RestMethod `
+            -Method Get `
+            -Uri "$($Endpoint.TrimEnd('/'))$Path" `
+            -Headers $headers `
+            -MaximumRedirection 0
+    } finally {
+        if ($null -ne $headers) {
+            $headers.Clear()
+        }
+        $headers = $null
+        $token = $null
+    }
+}
+
+function Get-SreAgentThreads {
+    param([Parameter(Mandatory)][string] $Endpoint)
+
+    $response = Invoke-SreAgentRead -Endpoint $Endpoint -Path '/api/v1/threads'
+    if ($null -ne $response.PSObject.Properties['value']) {
+        return @($response.value)
+    }
+    return @($response)
+}
