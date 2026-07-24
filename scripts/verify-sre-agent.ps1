@@ -204,6 +204,7 @@ if ($null -eq $planProperties) {
 }
 $azMonitorSettings = Get-OptionalValue -InputObject $planProperties -Name 'azMonitorFilterSettings'
 if ((Get-OptionalValue -InputObject $planProperties -Name 'incidentPlatform') -ne 'AzMonitor' -or
+    (Get-OptionalValue -InputObject $planProperties -Name 'isEnabled') -ne $true -or
     (Get-OptionalValue -InputObject $planProperties -Name 'agentMode') -ne 'Review' -or
     (Get-OptionalValue -InputObject $planProperties -Name 'handlingAgent') -ne 'incident-handler' -or
     (Get-OptionalValue -InputObject $planProperties -Name 'alertId') -ne $alertResourceId -or
@@ -222,9 +223,27 @@ $plans = if ($null -ne $plansResponse.PSObject.Properties['value']) {
 } else {
     @($plansResponse)
 }
-foreach ($forbiddenPlan in @('mercadona-cart-memory-sev2', 'quickstart_response_plan', 'quickstart_handler')) {
-    if ($plans | Where-Object { (Get-AgentProperty -InputObject $_ -Name 'name') -eq $forbiddenPlan }) {
-        throw "Competing response plan '$forbiddenPlan' is still present."
+$quickstartResponsePlan = $plans | Where-Object {
+    [string]::Equals(
+        [string](Get-AgentProperty -InputObject $_ -Name 'name'),
+        'quickstart_response_plan',
+        [StringComparison]::Ordinal
+    )
+} | Select-Object -First 1
+if ($null -ne $quickstartResponsePlan) {
+    throw "Disposable response plan 'quickstart_response_plan' is still present."
+}
+foreach ($preservedPlanName in @('mercadona-cart-memory-sev2', 'quickstart_handler')) {
+    $preservedPlan = $plans | Where-Object {
+        [string]::Equals(
+            [string](Get-AgentProperty -InputObject $_ -Name 'name'),
+            $preservedPlanName,
+            [StringComparison]::Ordinal
+        )
+    } | Select-Object -First 1
+    if ($null -ne $preservedPlan -and
+        (Get-AgentProperty -InputObject $preservedPlan -Name 'isEnabled') -ne $false) {
+        throw "Preserved competing response plan '$preservedPlanName' must be disabled."
     }
 }
 

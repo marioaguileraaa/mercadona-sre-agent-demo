@@ -307,6 +307,10 @@ function Get-OptionalPropertyValue {
     if ($null -eq $InputObject) {
         return $null
     }
+    if ($InputObject -is [System.Collections.IDictionary] -and
+        $InputObject.Contains($PropertyName)) {
+        return $InputObject[$PropertyName]
+    }
     $property = $InputObject.PSObject.Properties[$PropertyName]
     if ($null -eq $property) {
         return $null
@@ -339,6 +343,114 @@ function Get-FirstOptionalPropertyValue {
         }
     }
     return $null
+}
+
+function Disable-IncidentFilter {
+    param(
+        [Parameter(Mandatory)]
+        [string] $FilterId,
+        [Parameter(Mandatory)]
+        [string] $Reason
+    )
+
+    $filterPath = "/api/v2/extendedAgent/incidentFilters/$FilterId"
+    $existingFilter = Invoke-AgentApi -Method Get -Path $filterPath -Body $null
+    $existingProperties = Get-OptionalPropertyValue -InputObject $existingFilter -PropertyName 'properties'
+    $propertySource = if ($null -ne $existingProperties) {
+        $existingProperties
+    } else {
+        $existingFilter
+    }
+    if ((Get-OptionalPropertyValue -InputObject $propertySource -PropertyName 'isEnabled') -eq $false) {
+        Write-Host "IncidentFilter '$FilterId' is already disabled."
+        return
+    }
+
+    $disabledProperties = $propertySource |
+        ConvertTo-Json -Depth 30 |
+        ConvertFrom-Json -AsHashtable
+    if ($null -eq $existingProperties) {
+        foreach ($metadataProperty in @(
+                'id',
+                'filterId',
+                'name',
+                'type',
+                'tags',
+                'owner',
+                'createdAt',
+                'updatedAt',
+                'etag'
+            )) {
+            $disabledProperties.Remove($metadataProperty)
+        }
+    }
+    $disabledProperties['isEnabled'] = $false
+
+    $disabledFilter = [ordered]@{}
+    foreach ($propertyName in @('name', 'type', 'tags', 'owner')) {
+        $propertyValue = Get-OptionalPropertyValue -InputObject $existingFilter -PropertyName $propertyName
+        if ($null -ne $propertyValue) {
+            $disabledFilter[$propertyName] = $propertyValue
+        }
+    }
+    if (-not $disabledFilter.Contains('name')) {
+        $disabledFilter['name'] = $FilterId
+    }
+    if (-not $disabledFilter.Contains('type')) {
+        $disabledFilter['type'] = 'IncidentFilter'
+    }
+    $disabledFilter['properties'] = $disabledProperties
+
+    Invoke-AgentApi -Method Put -Path $filterPath -Body $disabledFilter | Out-Null
+    Write-Warning "Disabled competing IncidentFilter '$FilterId' without deleting it: $Reason"
+}
+
+function Sync-RetailIncidentFilters {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]] $ConfiguredFilters
+    )
+
+    $legacyRetailFilterId = 'mercadona-cart-memory-sev2'
+    $quickstartHandlerFilterId = 'quickstart_handler'
+    $quickstartResponsePlanId = 'quickstart_response_plan'
+
+    foreach ($configuredFilter in $ConfiguredFilters) {
+        $filterId = [string](Get-FirstOptionalPropertyValue `
+                -InputObject $configuredFilter `
+                -PropertyNames @('id', 'filterId', 'name'))
+        if ([string]::IsNullOrWhiteSpace($filterId)) {
+            continue
+        }
+
+        if ([string]::Equals($filterId, $legacyRetailFilterId, [StringComparison]::Ordinal)) {
+            Disable-IncidentFilter `
+                -FilterId $legacyRetailFilterId `
+                -Reason 'routing is owned by mercadona-cart-5xx-sev3; legacy identity and history were preserved'
+            continue
+        }
+        if ([string]::Equals($filterId, $quickstartHandlerFilterId, [StringComparison]::Ordinal)) {
+            Disable-IncidentFilter `
+                -FilterId $quickstartHandlerFilterId `
+                -Reason 'the quickstart filter can compete with the exact retail alert routing'
+            continue
+        }
+        if ([string]::Equals($filterId, $quickstartResponsePlanId, [StringComparison]::Ordinal)) {
+            if (-not [string]::Equals(
+                    $filterId,
+                    'quickstart_response_plan',
+                    [StringComparison]::Ordinal
+                )) {
+                throw "Refusing to delete non-approved IncidentFilter '$filterId'."
+            }
+            Invoke-AgentApi `
+                -Method Delete `
+                -Path '/api/v2/extendedAgent/incidentFilters/quickstart_response_plan' `
+                -Body $null | Out-Null
+            Write-Host "Removed exact disposable quickstart response plan '$filterId'."
+        }
+    }
 }
 
 function Invoke-AgentApi {
@@ -687,16 +799,7 @@ Invoke-AgentApi -Method Put -Path "/api/v2/extendedAgent/incidentFilters/$incide
 
 $configuredFiltersResponse = Invoke-AgentApi -Method Get -Path '/api/v2/extendedAgent/incidentFilters' -Body $null
 $configuredFilters = Get-ResponseItems -Response $configuredFiltersResponse -PropertyNames @('value', 'values', 'incidentFilters', 'items')
-$filtersToRemove = @('mercadona-cart-memory-sev2', 'quickstart_response_plan', 'quickstart_handler')
-foreach ($filterName in $filtersToRemove) {
-    $existingFilter = $configuredFilters | Where-Object {
-        (Get-FirstOptionalPropertyValue -InputObject $_ -PropertyNames @('name')) -eq $filterName
-    } | Select-Object -First 1
-    if ($null -ne $existingFilter) {
-        Invoke-AgentApi -Method Delete -Path "/api/v2/extendedAgent/incidentFilters/$filterName" -Body $null | Out-Null
-        Write-Host "Removed competing response plan '$filterName'."
-    }
-}
+Sync-RetailIncidentFilters -ConfiguredFilters @($configuredFilters)
 
 $triggerPayload = @{
     name = $triggerName
