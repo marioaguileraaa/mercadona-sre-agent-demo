@@ -345,6 +345,12 @@ foreach ($requiredContract in @(
 if ($source.Contains('/api/v2/extendedAgent/connectors/github', [StringComparison]::Ordinal)) {
     throw 'The deprecated GitHubOAuth connector API must not be used.'
 }
+if (-not $source.Contains('Authorization = "Bearer $accessToken"', [StringComparison]::Ordinal)) {
+    throw 'SRE Agent configuration does not use the acquired bearer token.'
+}
+if ($source.Contains('Authorization = "******"', [StringComparison]::Ordinal)) {
+    throw 'SRE Agent configuration uses a masked placeholder instead of the acquired bearer token.'
+}
 if ($source -notmatch "priorities\s*=\s*@\('Sev3'\)" -or
     $source -notmatch "agentMode\s*=\s*'Review'" -or
     $source -notmatch 'mergeEnabled\s*=\s*\$false') {

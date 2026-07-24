@@ -111,6 +111,9 @@ if (-not $commonSource.Contains('function Assert-ContainerAppSingleReadyRevision
 if (-not $commonSource.Contains('Authorization = "Bearer $token"', [StringComparison]::Ordinal)) {
     throw 'SRE Agent data-plane reads do not use the acquired bearer token.'
 }
+if ($commonSource.Contains('Authorization = "******"', [StringComparison]::Ordinal)) {
+    throw 'SRE Agent data-plane reads use a masked placeholder instead of the acquired bearer token.'
+}
 if ($recoverySource.Contains("-notin @('0', '10')", [StringComparison]::Ordinal)) {
     throw 'Recovery still rejects supported nonzero retention settings.'
 }
@@ -122,5 +125,31 @@ if (-not $startSource.Contains('$BackendAppName--$revisionSuffix', [StringCompar
     -not $recoverySource.Contains('$BackendAppName--$revisionSuffix', [StringComparison]::Ordinal)) {
     throw 'Expected custom revision names no longer match the Container Apps name format.'
 }
+
+$script:capturedAuthorization = $null
+function az {
+    if (($args -join ' ') -notmatch '^account get-access-token ') {
+        throw "Unexpected fake Azure CLI call: $($args -join ' ')"
+    }
+    $global:LASTEXITCODE = 0
+    return 'fake-token'
+}
+function Invoke-RestMethod {
+    param(
+        [string] $Method,
+        [string] $Uri,
+        [hashtable] $Headers,
+        [int] $MaximumRedirection
+    )
+
+    $script:capturedAuthorization = $Headers.Authorization
+    return [pscustomobject]@{ status = 'synthetic-ok' }
+}
+
+Invoke-SreAgentRead -Endpoint 'https://synthetic.invalid' -Path '/api/v1/threads' | Out-Null
+Assert-Equal `
+    -Actual $script:capturedAuthorization `
+    -Expected 'Bearer fake-token' `
+    -Case 'SRE Agent read sends acquired bearer token'
 
 Write-Host 'Azure demo common metric contract passed.'
