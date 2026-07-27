@@ -9,6 +9,9 @@ param location string = 'eastus2'
 @description('Existing demo resource group. Deployment updates it idempotently.')
 param resourceGroupName string = 'rg-mercadona-sre-agent-v1'
 
+@description('Existing Arc demo resource group included in the SRE Agent knowledge graph.')
+param arcResourceGroupName string = 'rg-arcbox-itpro-weu-002'
+
 @description('Backend image. The deployment script replaces the placeholder after remote ACR build.')
 param apiImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
@@ -34,6 +37,7 @@ var applicationInsightsName = 'appi-mercadona-demo-v1'
 var appIdentityName = 'id-mercadona-app-v1'
 var sreIdentityName = 'id-mercadona-sre-v1'
 var sreAgentName = 'sre-agent-mercadona-v1'
+var arcResourceGroupId = subscriptionResourceId('Microsoft.Resources/resourceGroups', arcResourceGroupName)
 
 var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var readerRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
@@ -302,6 +306,7 @@ resource sreAgent 'Microsoft.App/agents@2026-01-01' = {
       identity: sreIdentity.id
       managedResources: [
         resourceGroup().id
+        arcResourceGroupId
       ]
     }
     defaultModel: {

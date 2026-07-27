@@ -5,6 +5,7 @@
     "environmentName": { "value": "${AZURE_ENV_NAME}" },
     "location": { "value": "eastus2" },
     "resourceGroupName": { "value": "rg-mercadona-sre-agent-v1" },
+    "arcResourceGroupName": { "value": "rg-arcbox-itpro-weu-002" },
     "apiImage": { "value": "${SERVICE_API_IMAGE_NAME}" },
     "frontendImage": { "value": "${SERVICE_FRONTEND_IMAGE_NAME}" }
   }

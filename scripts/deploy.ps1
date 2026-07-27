@@ -3,6 +3,7 @@
 param(
     [string] $SubscriptionId = '5305e853-a63b-4b82-9a3f-6fde18c1a798',
     [string] $ResourceGroupName = 'rg-mercadona-sre-agent-v1',
+    [string] $ArcResourceGroupName = 'rg-arcbox-itpro-weu-002',
     [string] $Location = 'eastus2',
     [string] $BackendAppName = 'ca-mercadona-retail-api',
     [string] $FrontendAppName = 'ca-mercadona-retail-web',
@@ -10,6 +11,7 @@ param(
 )
 
 . "$PSScriptRoot\AzureDemo.Common.ps1"
+. "$PSScriptRoot\SreAgent.WhatIf.ps1"
 
 Assert-DemoAzureContext -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName
 if (-not $PSCmdlet.ShouldProcess("$SubscriptionId/$ResourceGroupName", 'Run two-pass Bicep deployment with remote ACR builds and smoke tests')) {
@@ -19,17 +21,68 @@ if (-not $PSCmdlet.ShouldProcess("$SubscriptionId/$ResourceGroupName", 'Run two-
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $initialDeploymentName = "mercadona-sre-initial-$ImageTag"
 $finalDeploymentName = "mercadona-sre-final-$ImageTag"
+$retailResourceGroupId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName"
+$arcResourceGroupId = "/subscriptions/$SubscriptionId/resourceGroups/$ArcResourceGroupName"
+$agentResourceId = "$retailResourceGroupId/providers/Microsoft.App/agents/sre-agent-mercadona-v1"
+$requiredManagedResourceIds = @($retailResourceGroupId, $arcResourceGroupId)
 
-az deployment group create `
-    --subscription $SubscriptionId `
-    --resource-group $ResourceGroupName `
-    --name $initialDeploymentName `
-    --template-file "$repoRoot\infra\main.bicep" `
-    --parameters environmentName=mercadona-sre-demo location=$Location resourceGroupName=$ResourceGroupName `
-    --output none
-if ($LASTEXITCODE -ne 0) {
-    throw 'Initial placeholder infrastructure deployment failed.'
+function Invoke-GuardedGroupDeployment {
+    param(
+        [Parameter(Mandatory)]
+        [string] $DeploymentName,
+        [Parameter(Mandatory)]
+        [string[]] $TemplateParameters,
+        [Parameter(Mandatory)]
+        [string] $FailureMessage
+    )
+
+    $baseArguments = @(
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ResourceGroupName,
+        '--name', $DeploymentName,
+        '--template-file', "$repoRoot\infra\main.bicep",
+        '--parameters'
+    ) + $TemplateParameters
+    $whatIfArguments = @(
+        'deployment', 'group', 'what-if'
+    ) + $baseArguments + @(
+        '--result-format', 'FullResourcePayloads',
+        '--output', 'json'
+    )
+    $whatIfJson = & az @whatIfArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Deployment what-if failed for '$DeploymentName'."
+    }
+    try {
+        $whatIf = ($whatIfJson -join [Environment]::NewLine) |
+            ConvertFrom-Json -Depth 100
+    } catch {
+        throw "Deployment what-if for '$DeploymentName' did not return valid JSON."
+    }
+    Assert-SreAgentWhatIfSafe `
+        -WhatIf $whatIf `
+        -AgentResourceId $agentResourceId `
+        -ArcResourceGroupId $arcResourceGroupId `
+        -RequiredManagedResourceIds $requiredManagedResourceIds
+
+    $createArguments = @(
+        'deployment', 'group', 'create'
+    ) + $baseArguments + @('--output', 'none')
+    & az @createArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw $FailureMessage
+    }
 }
+
+Invoke-GuardedGroupDeployment `
+    -DeploymentName $initialDeploymentName `
+    -TemplateParameters @(
+        'environmentName=mercadona-sre-demo',
+        "location=$Location",
+        "resourceGroupName=$ResourceGroupName",
+        "arcResourceGroupName=$ArcResourceGroupName"
+    ) `
+    -FailureMessage 'Initial placeholder infrastructure deployment failed.'
 
 $initialOutputs = az deployment group show `
     --subscription $SubscriptionId `
@@ -64,21 +117,17 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Remote frontend image build failed.'
 }
 
-az deployment group create `
-    --subscription $SubscriptionId `
-    --resource-group $ResourceGroupName `
-    --name $finalDeploymentName `
-    --template-file "$repoRoot\infra\main.bicep" `
-    --parameters `
-        environmentName=mercadona-sre-demo `
-        location=$Location `
-        resourceGroupName=$ResourceGroupName `
-        apiImage=$backendImage `
-        frontendImage=$frontendImage `
-    --output none
-if ($LASTEXITCODE -ne 0) {
-    throw 'Final image infrastructure deployment failed.'
-}
+Invoke-GuardedGroupDeployment `
+    -DeploymentName $finalDeploymentName `
+    -TemplateParameters @(
+        'environmentName=mercadona-sre-demo',
+        "location=$Location",
+        "resourceGroupName=$ResourceGroupName",
+        "arcResourceGroupName=$ArcResourceGroupName",
+        "apiImage=$backendImage",
+        "frontendImage=$frontendImage"
+    ) `
+    -FailureMessage 'Final image infrastructure deployment failed.'
 
 $finalOutputs = az deployment group show `
     --subscription $SubscriptionId `
