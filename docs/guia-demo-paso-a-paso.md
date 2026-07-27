@@ -44,7 +44,7 @@ $expectedCommit = (git rev-parse origin/main).Trim()
 .\scripts\verify-sre-agent.ps1 -ExpectedRepositoryCommit $expectedCommit
 ```
 
-La configuración valida antes de mutar filtros o subagentes: OAuth `github.com` healthy; writes exactos de issue create/update, branch, contents/push y pull request create; y CodeRepo con URL/tipo/branch correctos, `Ready` y el SHA completo esperado. La API usa primero `lastCommitHash`, con compatibilidad `commitId`/`commitHash` y respuestas wrapped/flat. Un SHA ausente, abreviado o stale detiene la demo.
+La configuración valida antes de mutar filtros o subagentes: OAuth `github.com` healthy; writes exactos de issue create/update, branch, contents/push y pull request create; y CodeRepo con URL/tipo/branch correctos, `Ready` y el SHA completo esperado. La API observada usa `properties.latestCommit`, con compatibilidad `lastCommitHash`/`commitId`/`commitHash` y respuestas wrapped/flat. Puede omitir o dejar en blanco la branch por defecto `main`; solo se acepta ese shape para `main`, una branch explícita usa comparación ordinal y siempre se exige `latestCommit` exacto. Un SHA ausente, abreviado o stale detiene la demo.
 
 Si OAuth o los writes están incompletos, realiza exactamente **Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests** y repite ambos comandos con el mismo `$expectedCommit`. No copies tokens.
 

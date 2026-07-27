@@ -46,6 +46,54 @@ function Get-SrePreflightProperty {
     return $null
 }
 
+function Get-SrePreflightPropertyInfo {
+    param(
+        [AllowNull()]
+        [object] $InputObject,
+        [Parameter(Mandatory)]
+        [string[]] $Names
+    )
+
+    $properties = Get-SrePreflightValue -InputObject $InputObject -Name 'properties'
+    foreach ($candidate in @($properties, $InputObject)) {
+        if ($null -eq $candidate) {
+            continue
+        }
+        foreach ($name in $Names) {
+            if ($candidate -is [System.Collections.IDictionary]) {
+                foreach ($key in $candidate.Keys) {
+                    if ([string]::Equals(
+                            [string] $key,
+                            $name,
+                            [StringComparison]::OrdinalIgnoreCase
+                        )) {
+                        return [PSCustomObject]@{
+                            Found = $true
+                            Value = $candidate[$key]
+                        }
+                    }
+                }
+                continue
+            }
+            $property = $candidate.PSObject.Properties |
+                Where-Object {
+                    [string]::Equals($_.Name, $name, [StringComparison]::OrdinalIgnoreCase)
+                } |
+                Select-Object -First 1
+            if ($null -ne $property) {
+                return [PSCustomObject]@{
+                    Found = $true
+                    Value = $property.Value
+                }
+            }
+        }
+    }
+    return [PSCustomObject]@{
+        Found = $false
+        Value = $null
+    }
+}
+
 function Get-SrePreflightItems {
     param(
         [AllowNull()]
@@ -117,17 +165,23 @@ function Get-SreRepositoryState {
         throw "CodeRepo detail response must contain exactly one repository. Reported '$($items.Count)'."
     }
     $item = $items[0]
+    $branchInfo = Get-SrePreflightPropertyInfo -InputObject $item -Names @('branch')
     return [PSCustomObject]@{
         Name = [string](Get-SrePreflightProperty -InputObject $item -Names @('name'))
         Url = [string](Get-SrePreflightProperty -InputObject $item -Names @('url'))
-        Branch = [string](Get-SrePreflightProperty -InputObject $item -Names @('branch'))
+        Branch = $branchInfo.Value
+        BranchPresent = $branchInfo.Found
         Type = [string](Get-SrePreflightProperty -InputObject $item -Names @('type'))
         CloneStatus = [string](Get-SrePreflightProperty -InputObject $item -Names @('cloneStatus'))
         Commit = [string](Get-SrePreflightProperty -InputObject $item -Names @(
+                'latestCommit',
                 'lastCommitHash',
                 'commitId',
                 'commitHash'
             ))
+        LastSuccessfulSync = [string](Get-SrePreflightProperty `
+                -InputObject $item `
+                -Names @('lastSuccessfulSync'))
     }
 }
 
@@ -143,13 +197,29 @@ function Assert-SreRepositorySource {
         [string] $RepositoryBranch
     )
 
+    $branchIsBlank = $State.BranchPresent -ne $true -or
+        $null -eq $State.Branch -or
+        ($State.Branch -is [string] -and
+         [string]::IsNullOrWhiteSpace([string] $State.Branch))
+    $branchMatches = (
+        -not $branchIsBlank -and
+        $State.Branch -is [string] -and
+        [string]::Equals(
+            [string] $State.Branch,
+            $RepositoryBranch,
+            [StringComparison]::Ordinal
+        )
+    ) -or (
+        $branchIsBlank -and
+        [string]::Equals($RepositoryBranch, 'main', [StringComparison]::Ordinal)
+    )
     if (-not [string]::Equals($State.Name, $RepositoryName, [StringComparison]::Ordinal) -or
         -not [string]::Equals(
             $State.Url.TrimEnd('/'),
             $RepositoryUrl.TrimEnd('/'),
             [StringComparison]::OrdinalIgnoreCase
         ) -or
-        -not [string]::Equals($State.Branch, $RepositoryBranch, [StringComparison]::Ordinal) -or
+        -not $branchMatches -or
         -not [string]::Equals($State.Type, 'GitHub', [StringComparison]::OrdinalIgnoreCase)) {
         throw "CodeRepo '$RepositoryName' does not match the required URL '$RepositoryUrl', branch '$RepositoryBranch', and type 'GitHub'. Refusing destructive replacement."
     }
@@ -227,7 +297,7 @@ function Wait-SreRepositoryReadyAtCommit {
         }
         if ($state.CloneStatus -eq 'Ready') {
             if ([string]::IsNullOrWhiteSpace($state.Commit)) {
-                throw "CodeRepo '$RepositoryName' is Ready but did not expose lastCommitHash, commitId, or commitHash."
+                throw "CodeRepo '$RepositoryName' is Ready but did not expose latestCommit, lastCommitHash, commitId, or commitHash."
             }
             if ($state.Commit -notmatch '^[0-9a-fA-F]{40}$') {
                 throw "CodeRepo '$RepositoryName' reported a non-full commit SHA '$($state.Commit)'."
@@ -238,7 +308,7 @@ function Wait-SreRepositoryReadyAtCommit {
             if (-not $syncRequested) {
                 if ($null -eq $RequestSynchronization) {
                     $manualStep = Get-SreRepositoryRefreshManualStep -RepositoryName $RepositoryName
-                    throw "CodeRepo '$RepositoryName' is stale. Expected full commit '$ExpectedCommit', reported '$($state.Commit)'. No supported repository synchronization endpoint is documented. $manualStep"
+                    throw "CodeRepo '$RepositoryName' is stale. Expected full commit '$ExpectedCommit', reported '$($state.Commit)'; last successful sync '$($state.LastSuccessfulSync)'. No supported repository synchronization endpoint is documented. $manualStep"
                 }
                 try {
                     & $RequestSynchronization
@@ -286,6 +356,12 @@ function Get-SreToolNames {
         -WrapperNames @('value', 'values', 'items', 'tools', 'data')
     $names = [System.Collections.Generic.List[string]]::new()
     foreach ($item in $items) {
+        if ($item -is [string]) {
+            if (-not [string]::IsNullOrWhiteSpace($item)) {
+                $names.Add($item)
+            }
+            continue
+        }
         $nestedTools = Get-SrePreflightValue -InputObject $item -Name 'tools'
         if ($null -ne $nestedTools -and $nestedTools -ne $item) {
             foreach ($nestedName in Get-SreToolNames -ToolsResponse $nestedTools) {

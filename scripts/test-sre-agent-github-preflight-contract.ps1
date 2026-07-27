@@ -50,9 +50,10 @@ function New-TestRepository {
         [string] $Status,
         [AllowEmptyString()]
         [string] $Commit,
-        [ValidateSet('lastCommitHash', 'commitId', 'commitHash')]
-        [string] $CommitField = 'lastCommitHash',
+        [ValidateSet('latestCommit', 'lastCommitHash', 'commitId', 'commitHash')]
+        [string] $CommitField = 'latestCommit',
         [string] $Url = 'https://github.com/marioaguileraaa/mercadona-sre-agent-demo',
+        [AllowNull()]
         [string] $Branch = 'main',
         [switch] $Flat,
         [switch] $Wrapped
@@ -65,6 +66,7 @@ function New-TestRepository {
             url = $Url
             branch = $Branch
             cloneStatus = $Status
+            lastSuccessfulSync = '2026-07-24T08:13:44.8919155Z'
         }
         if (-not [string]::IsNullOrWhiteSpace($Commit)) {
             $repository[$CommitField] = $Commit
@@ -75,6 +77,7 @@ function New-TestRepository {
             url = $Url
             branch = $Branch
             cloneStatus = $Status
+            lastSuccessfulSync = '2026-07-24T08:13:44.8919155Z'
         }
         if (-not [string]::IsNullOrWhiteSpace($Commit)) {
             $properties[$CommitField] = $Commit
@@ -155,6 +158,40 @@ $flatState = Wait-SreRepositoryReadyAtCommit `
     -RepositoryBranch main `
     -ExpectedCommit $expectedCommit
 Assert-Equal -Actual $flatState.Commit -Expected $expectedCommit -Case 'Flat Ready repository exact SHA'
+
+$actualSnapshotShape = [pscustomobject]@{
+    value = [pscustomobject]@{
+        name = $repositoryName
+        type = 'CodeRepo'
+        properties = [pscustomobject]@{
+            url = $repositoryUrl
+            type = 'GitHub'
+            branch = $null
+            cloneStatus = 'Ready'
+            latestCommit = $expectedCommit
+            lastSuccessfulSync = '2026-07-24T08:13:44.8919155Z'
+            scanStatus = 'NotStarted'
+        }
+    }
+    nextLink = $null
+}
+$actualSnapshotState = Wait-SreRepositoryReadyAtCommit `
+    -InitialRepository $actualSnapshotShape `
+    -ReadRepository $unexpectedRead `
+    -CreateRepository $null `
+    -RequestSynchronization $null `
+    -RepositoryName $repositoryName `
+    -RepositoryUrl $repositoryUrl `
+    -RepositoryBranch main `
+    -ExpectedCommit $expectedCommit
+Assert-Equal `
+    -Actual $actualSnapshotState.Commit `
+    -Expected $expectedCommit `
+    -Case 'Actual value/properties/latestCommit response shape'
+Assert-Equal `
+    -Actual $actualSnapshotState.LastSuccessfulSync `
+    -Expected '2026-07-24T08:13:44.8919155Z' `
+    -Case 'Actual lastSuccessfulSync response field'
 
 $wrappedReady = New-TestRepository `
     -Status Ready `
@@ -303,7 +340,7 @@ Assert-ThrowsLike `
             -RepositoryBranch main `
             -ExpectedCommit $expectedCommit
     } `
-    -ExpectedPattern '*Ready but did not expose lastCommitHash, commitId, or commitHash*' `
+    -ExpectedPattern '*Ready but did not expose latestCommit, lastCommitHash, commitId, or commitHash*' `
     -Case 'Ready repository missing SHA fails'
 
 Assert-ThrowsLike `
@@ -339,6 +376,50 @@ foreach ($sourceMismatch in @(
         } `
         -ExpectedPattern '*does not match the required URL*Refusing destructive replacement*' `
         -Case 'Repository source mismatch fails'
+}
+
+$blankMainState = Wait-SreRepositoryReadyAtCommit `
+    -InitialRepository (New-TestRepository -Status Ready -Commit $expectedCommit -Branch ' ') `
+    -ReadRepository $unexpectedRead `
+    -CreateRepository $null `
+    -RequestSynchronization $null `
+    -RepositoryName $repositoryName `
+    -RepositoryUrl $repositoryUrl `
+    -RepositoryBranch main `
+    -ExpectedCommit $expectedCommit
+Assert-Equal -Actual $blankMainState.Commit -Expected $expectedCommit -Case 'Blank branch defaults to main'
+
+$missingBranchRepository = New-TestRepository -Status Ready -Commit $expectedCommit
+$missingBranchRepository.properties.Remove('branch')
+$missingMainState = Wait-SreRepositoryReadyAtCommit `
+    -InitialRepository $missingBranchRepository `
+    -ReadRepository $unexpectedRead `
+    -CreateRepository $null `
+    -RequestSynchronization $null `
+    -RepositoryName $repositoryName `
+    -RepositoryUrl $repositoryUrl `
+    -RepositoryBranch main `
+    -ExpectedCommit $expectedCommit
+Assert-Equal -Actual $missingMainState.Commit -Expected $expectedCommit -Case 'Missing branch defaults to main'
+
+foreach ($blankFeatureRepository in @(
+        (New-TestRepository -Status Ready -Commit $expectedCommit -Branch ''),
+        $missingBranchRepository
+    )) {
+    Assert-ThrowsLike `
+        -Action {
+            Wait-SreRepositoryReadyAtCommit `
+                -InitialRepository $blankFeatureRepository `
+                -ReadRepository $unexpectedRead `
+                -CreateRepository $null `
+                -RequestSynchronization $null `
+                -RepositoryName $repositoryName `
+                -RepositoryUrl $repositoryUrl `
+                -RepositoryBranch feature `
+                -ExpectedCommit $expectedCommit
+        } `
+        -ExpectedPattern '*does not match the required URL*Refusing destructive replacement*' `
+        -Case 'Blank or missing branch does not default to feature'
 }
 
 $snakeTools = New-TestTools -Names @(
@@ -395,6 +476,57 @@ Assert-Equal -Actual $script:mutationCalls -Expected 0 -Case 'No repository muta
 if ($readOnlyFailure -match '(?i)token|secret=|authorization:') {
     throw 'Read-only capability failure exposed secret-shaped output.'
 }
+
+$actualDomainShape = [pscustomobject]@{
+    values = [pscustomobject]@{
+        name = 'github.com'
+        authType = 'OAuth'
+        isHealthy = $true
+        expiresOn = $null
+        lastError = $null
+        lastCheckedAt = '2026-07-24T10:38:43.1430677Z'
+    }
+}
+$actualReadOnlyToolCatalog = @(
+    'AskUserQuestion',
+    'CreateDirectory',
+    'CreateFile',
+    'FileSearch',
+    'FindConnectedGitHubRepo',
+    'GrepSearch',
+    'MultiReplaceStringInFile',
+    'ReadFile',
+    'ReplaceStringInFile',
+    'RunAzCliReadCommands',
+    'RunAzCliWriteCommands',
+    'RunInTerminal',
+    'ShowChangeDiffViewer',
+    'Terminal'
+)
+Assert-ThrowsLike `
+    -Action {
+        Assert-SreGithubWriteReadiness `
+            -DomainsResponse $actualDomainShape `
+            -ToolsResponse $actualReadOnlyToolCatalog
+    } `
+    -ExpectedPattern '*GitHub OAuth is healthy but exact write capabilities are missing*' `
+    -Case 'Actual healthy domain and read-only tool catalog fail closed'
+
+$actualWriteToolCatalog = @(
+    'issue_write',
+    'create_branch',
+    'push_files',
+    'create_pull_request'
+)
+$actualWriteSelection = @(
+    Assert-SreGithubWriteReadiness `
+        -DomainsResponse $actualDomainShape `
+        -ToolsResponse $actualWriteToolCatalog
+)
+Assert-Equal `
+    -Actual $actualWriteSelection.Count `
+    -Expected 4 `
+    -Case 'Observed string-array write tool catalog passes'
 
 Assert-ThrowsLike `
     -Action {
@@ -491,7 +623,7 @@ if ($repoDeleteCalls.Count -gt 0) {
 if ($verifySource -match '(?is)(Invoke-AgentApi|Invoke-SreAgentWrite).+?/api/v2/repos') {
     throw 'Verifier can mutate a CodeRepo.'
 }
-foreach ($requiredField in @('lastCommitHash', 'commitId', 'commitHash')) {
+foreach ($requiredField in @('latestCommit', 'lastCommitHash', 'commitId', 'commitHash')) {
     if (-not $preflightSource.Contains("'$requiredField'", [StringComparison]::Ordinal)) {
         throw "Repository commit compatibility field '$requiredField' is missing."
     }
