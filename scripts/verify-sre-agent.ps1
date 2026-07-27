@@ -7,7 +7,8 @@ param(
     [string] $RepositoryUrl = 'https://github.com/marioaguileraaa/mercadona-sre-agent-demo',
     [string] $RepositoryName = 'mercadona-sre-agent-demo',
     [string] $BackendAppName = 'ca-mercadona-retail-api',
-    [string] $ExpectedRepositoryCommit = ''
+    [string] $ExpectedRepositoryCommit = '',
+    [switch] $RequireExactRepositoryCommit
 )
 
 . "$PSScriptRoot\AzureDemo.Common.ps1"
@@ -176,7 +177,9 @@ $githubRepositoryPreflight = Invoke-SreGithubRepositoryPreflight `
     -RepositoryName $RepositoryName `
     -RepositoryUrl $RepositoryUrl `
     -RepositoryBranch 'main' `
-    -ExpectedCommit $expectedRepositoryCommit
+    -ExpectedCommit $expectedRepositoryCommit `
+    -RepositoryRoot $repoRoot `
+    -RequireExactCommitMatch:$RequireExactRepositoryCommit
 $selectedGitHubTools = @($githubRepositoryPreflight.SelectedTools)
 $repositoryState = $githubRepositoryPreflight.Repository
 
