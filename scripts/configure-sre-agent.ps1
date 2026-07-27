@@ -8,6 +8,7 @@ param(
     [string] $RepositoryName = 'mercadona-sre-agent-demo',
     [string] $GitHubRepository = 'marioaguileraaa/mercadona-sre-agent-demo',
     [string] $ExpectedRepositoryCommit = '',
+    [switch] $RequireExactRepositoryCommit,
     [ValidateRange(500, 1000000)]
     [int] $MonthlyAgentUnitLimit = 1000,
     [switch] $SetGitHubSecret
@@ -589,10 +590,12 @@ $githubRepositoryPreflight = Invoke-SreGithubRepositoryPreflight `
     -RepositoryName $RepositoryName `
     -RepositoryUrl $RepositoryUrl `
     -RepositoryBranch 'main' `
-    -ExpectedCommit $expectedRepositoryCommit
+    -ExpectedCommit $expectedRepositoryCommit `
+    -RepositoryRoot $repoRoot `
+    -RequireExactCommitMatch:$RequireExactRepositoryCommit
 $selectedGitHubTools = @($githubRepositoryPreflight.SelectedTools)
 $repositoryState = $githubRepositoryPreflight.Repository
-Write-Host "CodeRepo '$RepositoryName' is Ready at exact origin/main commit '$($repositoryState.Commit)'."
+Write-Host "CodeRepo '$RepositoryName' is Ready at accepted commit '$($repositoryState.Commit)' for expected origin/main commit '$expectedRepositoryCommit'."
 
 $limitPatch = @{
     properties = @{
@@ -926,7 +929,9 @@ $null = Wait-SreRepositoryReadyAtCommit `
     -RepositoryName $RepositoryName `
     -RepositoryUrl $RepositoryUrl `
     -RepositoryBranch 'main' `
-    -ExpectedCommit $expectedRepositoryCommit
+    -ExpectedCommit $expectedRepositoryCommit `
+    -RepositoryRoot $repoRoot `
+    -RequireExactCommitMatch:$RequireExactRepositoryCommit
 $verifiedSubagent = Invoke-AgentApi -Method Get -Path "/api/v2/extendedAgent/agents/$incidentHandlerName" -Body $null
 $verifiedFilter = Invoke-AgentApi -Method Get -Path "/api/v2/extendedAgent/incidentFilters/$incidentFilterName" -Body $null
 $verifiedTriggersResponse = Invoke-AgentApi -Method Get -Path '/api/v1/httptriggers' -Body $null

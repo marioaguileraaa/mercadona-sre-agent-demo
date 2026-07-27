@@ -1,3 +1,11 @@
+function Get-SreDefaultApplicationCodePath {
+    return @(
+        'MercadonaRetail.Api',
+        'MercadonaRetail.Web',
+        'mercadona-retail-frontend'
+    )
+}
+
 function Get-SrePreflightValue {
     param(
         [AllowNull()]
@@ -130,6 +138,193 @@ function Get-SrePreflightItems {
     return @($current)
 }
 
+function Get-SrePreflightBoolean {
+    param(
+        [AllowNull()]
+        [object] $Value
+    )
+
+    if ($Value -is [bool]) {
+        return [bool] $Value
+    }
+    if ($Value -is [string]) {
+        return [string]::Equals(([string] $Value).Trim(), 'true', [StringComparison]::OrdinalIgnoreCase)
+    }
+    return $false
+}
+
+function Invoke-SrePreflightGit {
+    param(
+        [Parameter(Mandatory)]
+        [string] $RepositoryRoot,
+        [Parameter(Mandatory)]
+        [string[]] $ArgumentList
+    )
+
+    if ($null -eq (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
+        throw "git was not found on PATH, so the indexed CodeRepo commit cannot be validated against '$RepositoryRoot'. The preflight fails closed."
+    }
+
+    $PSNativeCommandUseErrorActionPreference = $false
+    $arguments = @('-C', $RepositoryRoot) + $ArgumentList
+    $output = & git @arguments 2>$null
+    $exitCode = $LASTEXITCODE
+    return [PSCustomObject]@{
+        ExitCode = $exitCode
+        Output = ([string]::Join("`n", @($output | ForEach-Object { [string] $_ }))).Trim()
+    }
+}
+
+function Assert-SrePreflightRepositoryRoot {
+    param(
+        [Parameter(Mandatory)]
+        [string] $RepositoryRoot
+    )
+
+    $result = Invoke-SrePreflightGit `
+        -RepositoryRoot $RepositoryRoot `
+        -ArgumentList @('rev-parse', '--git-dir')
+    if ($result.ExitCode -ne 0) {
+        throw "'$RepositoryRoot' is not a usable local Git repository (git rev-parse --git-dir exit code $($result.ExitCode)). The indexed CodeRepo commit cannot be validated, so the preflight fails closed."
+    }
+}
+
+function Test-SrePreflightCommitExists {
+    param(
+        [Parameter(Mandatory)]
+        [string] $RepositoryRoot,
+        [Parameter(Mandatory)]
+        [string] $Commit
+    )
+
+    $result = Invoke-SrePreflightGit `
+        -RepositoryRoot $RepositoryRoot `
+        -ArgumentList @('cat-file', '-e', "$Commit^{commit}")
+    return $result.ExitCode -eq 0
+}
+
+function Test-SrePreflightAncestor {
+    param(
+        [Parameter(Mandatory)]
+        [string] $RepositoryRoot,
+        [Parameter(Mandatory)]
+        [string] $Ancestor,
+        [Parameter(Mandatory)]
+        [string] $Descendant
+    )
+
+    $result = Invoke-SrePreflightGit `
+        -RepositoryRoot $RepositoryRoot `
+        -ArgumentList @('merge-base', '--is-ancestor', $Ancestor, $Descendant)
+    if ($result.ExitCode -eq 0) {
+        return $true
+    }
+    if ($result.ExitCode -eq 1) {
+        return $false
+    }
+    throw "git merge-base --is-ancestor '$Ancestor' '$Descendant' failed with exit code $($result.ExitCode) in '$RepositoryRoot'. The indexed CodeRepo commit cannot be validated, so the preflight fails closed."
+}
+
+function Get-SreApplicationCodeCommit {
+    param(
+        [Parameter(Mandatory)]
+        [string] $RepositoryRoot,
+        [Parameter(Mandatory)]
+        [string] $MainCommit,
+        [Parameter(Mandatory)]
+        [string[]] $ApplicationCodePath
+    )
+
+    $paths = @($ApplicationCodePath | Where-Object { -not [string]::IsNullOrWhiteSpace([string] $_) })
+    if ($paths.Count -eq 0) {
+        throw 'ApplicationCodePath must contain at least one non-empty repository path.'
+    }
+    $result = Invoke-SrePreflightGit `
+        -RepositoryRoot $RepositoryRoot `
+        -ArgumentList (@('log', '-1', '--format=%H', $MainCommit, '--') + $paths)
+    if ($result.ExitCode -ne 0) {
+        throw "git log for application code paths '$($paths -join ', ')' at '$MainCommit' failed with exit code $($result.ExitCode) in '$RepositoryRoot'. The preflight fails closed."
+    }
+    $commit = ($result.Output -split "`n" | Select-Object -First 1)
+    $commit = ([string] $commit).Trim()
+    if ($commit -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "The latest application-code commit for paths '$($paths -join ', ')' at '$MainCommit' could not be determined in '$RepositoryRoot'. The preflight fails closed."
+    }
+    return $commit
+}
+
+function Test-SreIndexedCommitAcceptance {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $IndexedCommit,
+        [Parameter(Mandatory)]
+        [string] $ExpectedCommit,
+        [Parameter(Mandatory)]
+        [string] $RepositoryRoot,
+        [string[]] $ApplicationCodePath = (Get-SreDefaultApplicationCodePath),
+        [switch] $RequireExactMatch
+    )
+
+    $summary = "Expected full commit '$ExpectedCommit', reported '$IndexedCommit'"
+    $rejected = {
+        param([string] $Detail)
+        [PSCustomObject]@{
+            Accepted = $false
+            Reason = "$summary; $Detail"
+            ApplicationCodeCommit = ''
+        }
+    }
+
+    if ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'ExpectedCommit must be one full 40-character hexadecimal Git commit SHA.'
+    }
+    if ([string]::Equals($IndexedCommit, $ExpectedCommit, [StringComparison]::OrdinalIgnoreCase)) {
+        return [PSCustomObject]@{
+            Accepted = $true
+            Reason = ''
+            ApplicationCodeCommit = ''
+        }
+    }
+    if ($RequireExactMatch) {
+        return & $rejected '-RequireExactRepositoryCommit was requested, so only an exact match is accepted.'
+    }
+    if ($IndexedCommit -notmatch '^[0-9a-fA-F]{40}$') {
+        return & $rejected 'the indexed commit is not one full 40-character hexadecimal Git commit SHA.'
+    }
+    Assert-SrePreflightRepositoryRoot -RepositoryRoot $RepositoryRoot
+    if (-not (Test-SrePreflightCommitExists -RepositoryRoot $RepositoryRoot -Commit $IndexedCommit)) {
+        return & $rejected "the indexed commit does not exist in the local repository at '$RepositoryRoot'. Run 'git fetch origin' and retry."
+    }
+    if (-not (Test-SrePreflightCommitExists -RepositoryRoot $RepositoryRoot -Commit $ExpectedCommit)) {
+        return & $rejected "the expected main commit does not exist in the local repository at '$RepositoryRoot'. Run 'git fetch origin main' and retry."
+    }
+    if (-not (Test-SrePreflightAncestor `
+                -RepositoryRoot $RepositoryRoot `
+                -Ancestor $IndexedCommit `
+                -Descendant $ExpectedCommit)) {
+        return & $rejected 'the indexed commit is not an ancestor of, or equal to, the expected main commit.'
+    }
+
+    $paths = @($ApplicationCodePath | Where-Object { -not [string]::IsNullOrWhiteSpace([string] $_) })
+    $applicationCodeCommit = Get-SreApplicationCodeCommit `
+        -RepositoryRoot $RepositoryRoot `
+        -MainCommit $ExpectedCommit `
+        -ApplicationCodePath $paths
+    if (-not (Test-SrePreflightAncestor `
+                -RepositoryRoot $RepositoryRoot `
+                -Ancestor $applicationCodeCommit `
+                -Descendant $IndexedCommit)) {
+        return & $rejected "the indexed commit predates the latest application-code commit '$applicationCodeCommit' for paths '$($paths -join ', ')'."
+    }
+
+    return [PSCustomObject]@{
+        Accepted = $true
+        Reason = ''
+        ApplicationCodeCommit = $applicationCodeCommit
+    }
+}
+
 function Resolve-ExpectedRepositoryCommit {
     param(
         [AllowEmptyString()]
@@ -252,6 +447,9 @@ function Wait-SreRepositoryReadyAtCommit {
         [string] $RepositoryBranch,
         [Parameter(Mandatory)]
         [string] $ExpectedCommit,
+        [string] $RepositoryRoot = (Split-Path $PSScriptRoot -Parent),
+        [string[]] $ApplicationCodePath = (Get-SreDefaultApplicationCodePath),
+        [switch] $RequireExactCommitMatch,
         [ValidateRange(1, 3600)]
         [int] $TimeoutSeconds = 600,
         [ValidateRange(1, 300)]
@@ -281,6 +479,7 @@ function Wait-SreRepositoryReadyAtCommit {
 
     $syncRequested = $false
     $state = $null
+    $lastRejectionReason = ''
     while ($true) {
         if ($repositoryReadAfterStart -and (& $GetUtcNow) -ge $deadline) {
             break
@@ -302,13 +501,20 @@ function Wait-SreRepositoryReadyAtCommit {
             if ($state.Commit -notmatch '^[0-9a-fA-F]{40}$') {
                 throw "CodeRepo '$RepositoryName' reported a non-full commit SHA '$($state.Commit)'."
             }
-            if ([string]::Equals($state.Commit, $ExpectedCommit, [StringComparison]::OrdinalIgnoreCase)) {
+            $acceptance = Test-SreIndexedCommitAcceptance `
+                -IndexedCommit $state.Commit `
+                -ExpectedCommit $ExpectedCommit `
+                -RepositoryRoot $RepositoryRoot `
+                -ApplicationCodePath $ApplicationCodePath `
+                -RequireExactMatch:$RequireExactCommitMatch
+            if ($acceptance.Accepted) {
                 return $state
             }
+            $lastRejectionReason = [string] $acceptance.Reason
             if (-not $syncRequested) {
                 if ($null -eq $RequestSynchronization) {
                     $manualStep = Get-SreRepositoryRefreshManualStep -RepositoryName $RepositoryName
-                    throw "CodeRepo '$RepositoryName' is stale. Expected full commit '$ExpectedCommit', reported '$($state.Commit)'; last successful sync '$($state.LastSuccessfulSync)'. No supported repository synchronization endpoint is documented. $manualStep"
+                    throw "CodeRepo '$RepositoryName' is stale. $lastRejectionReason Last successful sync '$($state.LastSuccessfulSync)'. No supported repository synchronization endpoint is documented. $manualStep"
                 }
                 try {
                     & $RequestSynchronization
@@ -338,14 +544,19 @@ function Wait-SreRepositoryReadyAtCommit {
             Commit = ''
         }
     }
-    throw "CodeRepo '$RepositoryName' did not reach Ready at exact commit '$ExpectedCommit' within $TimeoutSeconds seconds. Last cloneStatus '$($lastState.CloneStatus)', commit '$($lastState.Commit)'."
+    $rejectionSuffix = if ([string]::IsNullOrWhiteSpace($lastRejectionReason)) {
+        ''
+    } else {
+        " $lastRejectionReason"
+    }
+    throw "CodeRepo '$RepositoryName' did not reach Ready at an acceptable commit for expected main commit '$ExpectedCommit' within $TimeoutSeconds seconds. Last cloneStatus '$($lastState.CloneStatus)', commit '$($lastState.Commit)'.$rejectionSuffix"
 }
 
 function Get-SreGithubOAuthManualStep {
-    return 'Manual step: Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests.'
+    return 'Manual step: Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests. If the GitHub MCP connector supplies the write tools, confirm in Builder > Connectors that the MCP connector is present and that every required tool is enabled.'
 }
 
-function Get-SreToolNames {
+function Get-SreToolDescriptors {
     param(
         [AllowNull()]
         [object] $ToolsResponse
@@ -354,33 +565,87 @@ function Get-SreToolNames {
     $items = Get-SrePreflightItems `
         -Response $ToolsResponse `
         -WrapperNames @('value', 'values', 'items', 'tools', 'data')
-    $names = [System.Collections.Generic.List[string]]::new()
+    $descriptors = [System.Collections.Generic.List[object]]::new()
     foreach ($item in $items) {
+        if ($null -eq $item) {
+            continue
+        }
         if ($item -is [string]) {
             if (-not [string]::IsNullOrWhiteSpace($item)) {
-                $names.Add($item)
+                $descriptors.Add([PSCustomObject]@{
+                        Name = ([string] $item).Trim()
+                        EnabledPresent = $false
+                        Enabled = $true
+                    })
             }
             continue
         }
         $nestedTools = Get-SrePreflightValue -InputObject $item -Name 'tools'
-        if ($null -ne $nestedTools -and $nestedTools -ne $item) {
-            foreach ($nestedName in Get-SreToolNames -ToolsResponse $nestedTools) {
-                $names.Add($nestedName)
+        if ($null -ne $nestedTools -and -not [object]::ReferenceEquals($nestedTools, $item)) {
+            foreach ($nested in @(Get-SreToolDescriptors -ToolsResponse $nestedTools)) {
+                $descriptors.Add($nested)
             }
         }
         $name = Get-SrePreflightProperty -InputObject $item -Names @('name', 'toolName')
-        if (-not [string]::IsNullOrWhiteSpace([string] $name)) {
-            $names.Add([string] $name)
+        if ([string]::IsNullOrWhiteSpace([string] $name)) {
+            continue
         }
+        $enabledInfo = Get-SrePreflightPropertyInfo -InputObject $item -Names @('enabled')
+        $enabled = if ($enabledInfo.Found) {
+            Get-SrePreflightBoolean -Value $enabledInfo.Value
+        } else {
+            $true
+        }
+        $descriptors.Add([PSCustomObject]@{
+                Name = ([string] $name).Trim()
+                EnabledPresent = [bool] $enabledInfo.Found
+                Enabled = [bool] $enabled
+            })
     }
-    return @($names | Select-Object -Unique)
+    return @($descriptors)
+}
+
+function Get-SreToolNames {
+    param(
+        [AllowNull()]
+        [object] $ToolsResponse
+    )
+
+    return @(
+        Get-SreToolDescriptors -ToolsResponse $ToolsResponse |
+            ForEach-Object { $_.Name } |
+            Select-Object -Unique
+    )
+}
+
+function Get-SreRequiredGithubWriteCapability {
+    return [ordered]@{
+        issueCreate = @('github_issue_write', 'issue_write', 'CreateGithubIssue')
+        issueUpdate = @('github_issue_write', 'issue_write', 'UpdateGithubIssue')
+        branchCreate = @('github_create_branch', 'create_branch', 'CreateGithubBranch')
+        contentsWrite = @(
+            'github_push_files',
+            'github_create_or_update_file',
+            'push_files',
+            'PushGithubFiles'
+        )
+        pullRequestCreate = @(
+            'github_create_pull_request',
+            'create_pull_request',
+            'CreateGithubPullRequest'
+        )
+    }
 }
 
 function Assert-SreGithubWriteReadiness {
     param(
         [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [object] $DomainsResponse,
         [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [object] $ToolsResponse
     )
 
@@ -416,27 +681,52 @@ function Assert-SreGithubWriteReadiness {
         throw "INCOMPLETE: GitHub OAuth domain 'github.com' is not healthy. Reported '$domainStatus'. $manualStep"
     }
 
-    $toolNames = @(Get-SreToolNames -ToolsResponse $ToolsResponse)
-    $requiredCapabilities = [ordered]@{
-        issueCreate = @('issue_write', 'CreateGithubIssue')
-        issueUpdate = @('issue_write', 'UpdateGithubIssue')
-        branchCreate = @('create_branch', 'CreateGithubBranch')
-        contentsWrite = @('push_files', 'PushGithubFiles')
-        pullRequestCreate = @('create_pull_request', 'CreateGithubPullRequest')
+    $toolDescriptors = @(Get-SreToolDescriptors -ToolsResponse $ToolsResponse)
+    if ($toolDescriptors.Count -eq 0) {
+        $manualStep = Get-SreGithubOAuthManualStep
+        throw "INCOMPLETE: The agent tool catalog response was not recognized as either the current '{ data: [ { name, enabled } ] }' descriptor payload or a legacy flat array of tool names, so no tool could be read. Failing closed. $manualStep"
     }
+    $enabledToolNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    $disabledToolNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($descriptor in $toolDescriptors) {
+        if ($descriptor.Enabled) {
+            [void] $enabledToolNames.Add([string] $descriptor.Name)
+        } else {
+            [void] $disabledToolNames.Add([string] $descriptor.Name)
+        }
+    }
+
+    $requiredCapabilities = Get-SreRequiredGithubWriteCapability
     $selectedTools = [System.Collections.Generic.List[string]]::new()
     $missingCapabilities = [System.Collections.Generic.List[string]]::new()
     foreach ($capability in $requiredCapabilities.GetEnumerator()) {
-        $matchingTool = $capability.Value | Where-Object { $toolNames -ccontains $_ } | Select-Object -First 1
-        if ([string]::IsNullOrWhiteSpace([string] $matchingTool)) {
-            $missingCapabilities.Add($capability.Key)
-        } else {
+        $matchingTool = $capability.Value |
+            Where-Object { $enabledToolNames.Contains([string] $_) } |
+            Select-Object -First 1
+        if (-not [string]::IsNullOrWhiteSpace([string] $matchingTool)) {
             $selectedTools.Add([string] $matchingTool)
+            continue
+        }
+        $disabledTool = $capability.Value |
+            Where-Object { $disabledToolNames.Contains([string] $_) } |
+            Select-Object -First 1
+        if (-not [string]::IsNullOrWhiteSpace([string] $disabledTool)) {
+            $missingCapabilities.Add(
+                "$($capability.Key) (present but disabled: '$disabledTool')"
+            )
+        } else {
+            $missingCapabilities.Add(
+                "$($capability.Key) (accepted: $($capability.Value -join ' | '))"
+            )
         }
     }
     if ($missingCapabilities.Count -gt 0) {
         $manualStep = Get-SreGithubOAuthManualStep
-        throw "INCOMPLETE: GitHub OAuth is healthy but exact write capabilities are missing: $($missingCapabilities -join ', '). Read-only tools do not satisfy this preflight. $manualStep"
+        throw "INCOMPLETE: GitHub OAuth is healthy but exact write capabilities are missing: $($missingCapabilities -join '; '). Tool names are matched exactly and case-sensitively, and a disabled tool never counts. Read-only tools do not satisfy this preflight. $manualStep"
     }
 
     return @($selectedTools | Select-Object -Unique)
@@ -445,8 +735,12 @@ function Assert-SreGithubWriteReadiness {
 function Invoke-SreGithubRepositoryPreflight {
     param(
         [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [object] $DomainsResponse,
         [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [object] $ToolsResponse,
         [AllowNull()]
         [object] $InitialRepository,
@@ -464,6 +758,9 @@ function Invoke-SreGithubRepositoryPreflight {
         [string] $RepositoryBranch,
         [Parameter(Mandatory)]
         [string] $ExpectedCommit,
+        [string] $RepositoryRoot = (Split-Path $PSScriptRoot -Parent),
+        [string[]] $ApplicationCodePath = (Get-SreDefaultApplicationCodePath),
+        [switch] $RequireExactCommitMatch,
         [ValidateRange(1, 3600)]
         [int] $TimeoutSeconds = 600,
         [ValidateRange(1, 300)]
@@ -486,6 +783,9 @@ function Invoke-SreGithubRepositoryPreflight {
         -RepositoryUrl $RepositoryUrl `
         -RepositoryBranch $RepositoryBranch `
         -ExpectedCommit $ExpectedCommit `
+        -RepositoryRoot $RepositoryRoot `
+        -ApplicationCodePath $ApplicationCodePath `
+        -RequireExactCommitMatch:$RequireExactCommitMatch `
         -TimeoutSeconds $TimeoutSeconds `
         -PollIntervalSeconds $PollIntervalSeconds `
         -Sleep $Sleep `

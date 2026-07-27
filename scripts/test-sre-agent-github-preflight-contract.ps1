@@ -135,6 +135,99 @@ function New-TestTools {
     return $tools
 }
 
+function New-TestToolDescriptor {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Name,
+        [bool] $Enabled = $true,
+        [string] $Source = 'mcp',
+        [string] $Category = 'MCP',
+        [switch] $OmitEnabledProperty
+    )
+
+    $descriptor = [ordered]@{
+        name = $Name
+        source = $Source
+        mcpConnector = 'github'
+        mcpConnectorDisplayName = 'github'
+        defaultMode = 'ask'
+    }
+    if (-not $OmitEnabledProperty) {
+        $descriptor['enabled'] = $Enabled
+    }
+    $descriptor['category'] = $Category
+    $descriptor['schema'] = [pscustomobject]@{ type = 'object' }
+    $descriptor['description'] = "Synthetic descriptor for $Name."
+    return [pscustomobject] $descriptor
+}
+
+function New-TestToolCatalog {
+    param(
+        [string[]] $EnabledName = @(),
+        [string[]] $DisabledName = @(),
+        [switch] $OmitEnabledProperty
+    )
+
+    $descriptors = [System.Collections.Generic.List[object]]::new()
+    foreach ($name in $EnabledName) {
+        $descriptors.Add((New-TestToolDescriptor `
+                    -Name $name `
+                    -Enabled $true `
+                    -OmitEnabledProperty:$OmitEnabledProperty))
+    }
+    foreach ($name in $DisabledName) {
+        $descriptors.Add((New-TestToolDescriptor -Name $name -Enabled $false))
+    }
+    return [pscustomobject]@{ data = @($descriptors) }
+}
+
+function Invoke-TestGit {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Root,
+        [Parameter(Mandatory)]
+        [string[]] $ArgumentList
+    )
+
+    $PSNativeCommandUseErrorActionPreference = $false
+    $output = & git @(@('-C', $Root) + $ArgumentList) 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Test git '$($ArgumentList -join ' ')' failed with exit code $LASTEXITCODE."
+    }
+    return ([string]::Join("`n", @($output | ForEach-Object { [string] $_ }))).Trim()
+}
+
+function New-TestGitRepository {
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("sre-preflight-$([Guid]::NewGuid().ToString('N'))")
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    Invoke-TestGit -Root $root -ArgumentList @('init', '--quiet', '--initial-branch', 'main') | Out-Null
+    Invoke-TestGit -Root $root -ArgumentList @('config', 'user.name', 'SRE Contract Test') | Out-Null
+    Invoke-TestGit -Root $root -ArgumentList @('config', 'user.email', 'sre-contract@example.invalid') | Out-Null
+    Invoke-TestGit -Root $root -ArgumentList @('config', 'commit.gpgsign', 'false') | Out-Null
+    return $root
+}
+
+function Add-TestCommit {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Root,
+        [Parameter(Mandatory)]
+        [string] $Path,
+        [Parameter(Mandatory)]
+        [string] $Message
+    )
+
+    $fullPath = Join-Path $Root $Path
+    $parent = Split-Path $fullPath -Parent
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    Add-Content -LiteralPath $fullPath -Value $Message -Encoding utf8
+    Invoke-TestGit -Root $Root -ArgumentList @('add', '--', $Path) | Out-Null
+    Invoke-TestGit -Root $Root -ArgumentList @('commit', '--quiet', '-m', $Message) | Out-Null
+    return (Invoke-TestGit -Root $Root -ArgumentList @('rev-parse', 'HEAD'))
+}
+
 $expectedCommit = ('a' * 40) -join ''
 $staleCommit = ('b' * 40) -join ''
 $repositoryName = 'mercadona-sre-agent-demo'
@@ -286,7 +379,7 @@ Assert-ThrowsLike `
             -Sleep $advanceFakeClock `
             -GetUtcNow $getFakeUtcNow
     } `
-    -ExpectedPattern '*did not reach Ready at exact commit*within 2 seconds*' `
+    -ExpectedPattern '*did not reach Ready at an acceptable commit for expected main commit*within 2 seconds*' `
     -Case 'Repository indexing timeout fails'
 Assert-Equal -Actual $script:pendingReadCalls -Expected 2 -Case 'Timeout waits through the full deadline'
 
@@ -310,7 +403,7 @@ Assert-ThrowsLike `
             -Sleep { param([int] $Seconds) } `
             -GetUtcNow $getFakeUtcNow
     } `
-    -ExpectedPattern '*did not reach Ready at exact commit*within 2 seconds*' `
+    -ExpectedPattern '*did not reach Ready at an acceptable commit for expected main commit*within 2 seconds*' `
     -Case 'Ready result returned after deadline is rejected'
 
 Assert-ThrowsLike `
@@ -575,8 +668,401 @@ Assert-ThrowsLike `
     -ExpectedPattern '*one full 40-character hexadecimal Git commit SHA*' `
     -Case 'Expected commit rejects abbreviated SHA'
 
-$configureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'configure-sre-agent.ps1') -Raw
+# --- Tool catalog: current descriptor payload, legacy payloads, and fail-closed shapes ---
+
+$realWriteToolName = @(
+    'github_issue_write',
+    'github_create_branch',
+    'github_push_files',
+    'github_create_pull_request'
+)
+$realCatalogSelection = @(
+    Assert-SreGithubWriteReadiness `
+        -DomainsResponse (New-TestDomains) `
+        -ToolsResponse (New-TestToolCatalog -EnabledName $realWriteToolName)
+)
+Assert-Equal `
+    -Actual $realCatalogSelection.Count `
+    -Expected 4 `
+    -Case 'Current data descriptor catalog with real names passes'
+foreach ($expectedSelected in $realWriteToolName) {
+    if ($realCatalogSelection -cnotcontains $expectedSelected) {
+        throw "Descriptor catalog selection did not report the real tool '$expectedSelected'."
+    }
+}
+
+$mixedRealCatalog = New-TestToolCatalog -EnabledName @(
+    'github_get_file_contents',
+    'github_search_code',
+    'github_list_issues',
+    'github_issue_read',
+    'github_sub_issue_write',
+    'github_pull_request_review_write',
+    'github_issue_write',
+    'github_create_branch',
+    'github_create_or_update_file',
+    'github_create_pull_request',
+    'CreateFile',
+    'RunInTerminal',
+    'Terminal',
+    'RunAzCliWriteCommands',
+    'MultiReplaceStringInFile',
+    'ReplaceStringInFile',
+    'CreateDirectory'
+)
+$mixedRealSelection = @(
+    Assert-SreGithubWriteReadiness `
+        -DomainsResponse (New-TestDomains) `
+        -ToolsResponse $mixedRealCatalog
+)
+Assert-Equal `
+    -Actual $mixedRealSelection.Count `
+    -Expected 4 `
+    -Case 'Realistic mixed catalog selects only GitHub write tools'
+if ($mixedRealSelection -cnotcontains 'github_create_or_update_file') {
+    throw 'github_create_or_update_file was not accepted as the contents-write alternative.'
+}
+
+$legacyStringSelection = @(
+    Assert-SreGithubWriteReadiness `
+        -DomainsResponse (New-TestDomains) `
+        -ToolsResponse $realWriteToolName
+)
+Assert-Equal `
+    -Actual $legacyStringSelection.Count `
+    -Expected 4 `
+    -Case 'Legacy flat string array with real names passes'
+
+$descriptorsWithoutEnabled = @(
+    Assert-SreGithubWriteReadiness `
+        -DomainsResponse (New-TestDomains) `
+        -ToolsResponse (New-TestToolCatalog `
+                -EnabledName $realWriteToolName `
+                -OmitEnabledProperty)
+)
+Assert-Equal `
+    -Actual $descriptorsWithoutEnabled.Count `
+    -Expected 4 `
+    -Case 'Descriptors without an enabled property are not invented as disabled'
+
+foreach ($malformedCatalog in @(
+        $null,
+        @(),
+        ([pscustomobject]@{}),
+        ([pscustomobject]@{ data = @() }),
+        ([pscustomobject]@{ data = @([pscustomobject]@{ category = 'MCP' }) })
+    )) {
+    Assert-ThrowsLike `
+        -Action {
+            Assert-SreGithubWriteReadiness `
+                -DomainsResponse (New-TestDomains) `
+                -ToolsResponse $malformedCatalog
+        } `
+        -ExpectedPattern '*agent tool catalog response was not recognized*Failing closed*' `
+        -Case 'Malformed or empty tool catalog fails closed'
+}
+
+Assert-ThrowsLike `
+    -Action {
+        Assert-SreGithubWriteReadiness `
+            -DomainsResponse (New-TestDomains) `
+            -ToolsResponse (New-TestToolCatalog -EnabledName @(
+                    'github_issue_write',
+                    'github_create_branch',
+                    'github_push_files'
+                ))
+    } `
+    -ExpectedPattern '*write capabilities are missing*pullRequestCreate*' `
+    -Case 'Absent pull-request-create capability fails'
+
+$disabledFailure = Assert-ThrowsLike `
+    -Action {
+        Assert-SreGithubWriteReadiness `
+            -DomainsResponse (New-TestDomains) `
+            -ToolsResponse (New-TestToolCatalog `
+                    -EnabledName @(
+                        'github_create_branch',
+                        'github_push_files',
+                        'github_create_pull_request'
+                    ) `
+                    -DisabledName @('github_issue_write'))
+    } `
+    -ExpectedPattern '*write capabilities are missing*' `
+    -Case 'Present but disabled capability fails'
+if ($disabledFailure -notlike "*present but disabled: 'github_issue_write'*") {
+    throw 'Disabled tool failure did not identify the disabled tool by name.'
+}
+
+Assert-ThrowsLike `
+    -Action {
+        Assert-SreGithubWriteReadiness `
+            -DomainsResponse (New-TestDomains) `
+            -ToolsResponse (New-TestToolCatalog -EnabledName @(
+                    'CreateFile',
+                    'RunInTerminal'
+                ))
+    } `
+    -ExpectedPattern '*write capabilities are missing*Read-only tools do not satisfy this preflight*' `
+    -Case 'Local-only tool catalog fails'
+
+$substringFailure = Assert-ThrowsLike `
+    -Action {
+        Assert-SreGithubWriteReadiness `
+            -DomainsResponse (New-TestDomains) `
+            -ToolsResponse (New-TestToolCatalog -EnabledName @(
+                    'github_sub_issue_write',
+                    'github_create_branch',
+                    'github_push_files',
+                    'github_pull_request_review_write'
+                ))
+    } `
+    -ExpectedPattern '*write capabilities are missing*' `
+    -Case 'Substring-adjacent tool names never satisfy a capability'
+foreach ($unsatisfiedCapability in @('issueCreate', 'issueUpdate', 'pullRequestCreate')) {
+    if ($substringFailure -notlike "*$unsatisfiedCapability*") {
+        throw "github_sub_issue_write or github_pull_request_review_write wrongly satisfied '$unsatisfiedCapability'."
+    }
+}
+
+$caseFailure = Assert-ThrowsLike `
+    -Action {
+        Assert-SreGithubWriteReadiness `
+            -DomainsResponse (New-TestDomains) `
+            -ToolsResponse (New-TestToolCatalog -EnabledName @(
+                    'GitHub_Issue_Write',
+                    'GITHUB_CREATE_BRANCH',
+                    'Github_Push_Files',
+                    'GitHub_Create_Pull_Request'
+                ))
+    } `
+    -ExpectedPattern '*write capabilities are missing*' `
+    -Case 'Tool name comparison stays ordinal case-sensitive'
+if ($caseFailure -notlike '*issueCreate*') {
+    throw 'Case-shifted tool names were accepted for issueCreate.'
+}
+
+# --- Indexed commit acceptance over a deterministic temporary Git repository ---
+
+$testRepositoryRoot = New-TestGitRepository
+try {
+    $apiCommit = Add-TestCommit `
+        -Root $testRepositoryRoot `
+        -Path 'MercadonaRetail.Api/Program.cs' `
+        -Message 'Add synthetic retail API entry point'
+    $frontendCommit = Add-TestCommit `
+        -Root $testRepositoryRoot `
+        -Path 'mercadona-retail-frontend/src/App.tsx' `
+        -Message 'Add synthetic retail frontend shell'
+    $docsCommit = Add-TestCommit `
+        -Root $testRepositoryRoot `
+        -Path 'docs/runbooks/cart-memory-pressure.md' `
+        -Message 'Document the synthetic cart runbook'
+    $mainCommit = Add-TestCommit `
+        -Root $testRepositoryRoot `
+        -Path 'scripts/configure-sre-agent.ps1' `
+        -Message 'Harden the synthetic configure script'
+    Invoke-TestGit -Root $testRepositoryRoot -ArgumentList @(
+        'checkout', '--quiet', '-b', 'side', $apiCommit
+    ) | Out-Null
+    $sideCommit = Add-TestCommit `
+        -Root $testRepositoryRoot `
+        -Path 'docs/side-note.md' `
+        -Message 'Add a synthetic side-branch note'
+    Invoke-TestGit -Root $testRepositoryRoot -ArgumentList @('checkout', '--quiet', 'main') | Out-Null
+
+    $identical = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit $mainCommit `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot
+    Assert-Equal -Actual $identical.Accepted -Expected $true -Case 'Indexed commit equal to main is accepted'
+
+    $ancestorWithoutAppChanges = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit $docsCommit `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot
+    Assert-Equal `
+        -Actual $ancestorWithoutAppChanges.Accepted `
+        -Expected $true `
+        -Case 'Ancestor with no missing application code is accepted'
+    Assert-Equal `
+        -Actual $ancestorWithoutAppChanges.ApplicationCodeCommit `
+        -Expected $frontendCommit `
+        -Case 'Accepted ancestor reports the latest application-code commit'
+
+    $ancestorAtAppCommit = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit $frontendCommit `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot
+    Assert-Equal `
+        -Actual $ancestorAtAppCommit.Accepted `
+        -Expected $true `
+        -Case 'Indexed commit equal to the latest application-code commit is accepted'
+
+    $staleApplicationCode = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit $apiCommit `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot
+    Assert-Equal `
+        -Actual $staleApplicationCode.Accepted `
+        -Expected $false `
+        -Case 'Ancestor predating the latest application-code commit is rejected'
+    if ($staleApplicationCode.Reason -notlike "*predates the latest application-code commit '$frontendCommit'*" -or
+        $staleApplicationCode.Reason -notlike "*reported '$apiCommit'*" -or
+        $staleApplicationCode.Reason -notlike "*Expected full commit '$mainCommit'*") {
+        throw "Stale application-code rejection did not report the exact condition and SHAs. Reported: $($staleApplicationCode.Reason)"
+    }
+
+    $missingCommit = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit (('f' * 40) -join '') `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot
+    Assert-Equal `
+        -Actual $missingCommit.Accepted `
+        -Expected $false `
+        -Case 'Indexed commit that does not exist locally is rejected'
+    if ($missingCommit.Reason -notlike '*does not exist in the local repository*') {
+        throw "Missing indexed commit rejection did not report the exact condition. Reported: $($missingCommit.Reason)"
+    }
+
+    $foreignBranchCommit = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit $sideCommit `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot
+    Assert-Equal `
+        -Actual $foreignBranchCommit.Accepted `
+        -Expected $false `
+        -Case 'Indexed commit outside the main line is rejected'
+    if ($foreignBranchCommit.Reason -notlike '*not an ancestor of, or equal to, the expected main commit*') {
+        throw "Foreign-branch rejection did not report the exact condition. Reported: $($foreignBranchCommit.Reason)"
+    }
+
+    foreach ($malformedIndexedCommit in @('932284c', '', 'not-a-sha', ($mainCommit + 'a'))) {
+        $malformed = Test-SreIndexedCommitAcceptance `
+            -IndexedCommit $malformedIndexedCommit `
+            -ExpectedCommit $mainCommit `
+            -RepositoryRoot $testRepositoryRoot
+        Assert-Equal `
+            -Actual $malformed.Accepted `
+            -Expected $false `
+            -Case 'Malformed or abbreviated indexed SHA is rejected'
+        if ($malformed.Reason -notlike '*not one full 40-character hexadecimal Git commit SHA*') {
+            throw "Malformed indexed SHA rejection did not report the exact condition. Reported: $($malformed.Reason)"
+        }
+    }
+
+    $strictMismatch = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit $docsCommit `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot `
+        -RequireExactMatch
+    Assert-Equal `
+        -Actual $strictMismatch.Accepted `
+        -Expected $false `
+        -Case 'Explicit -RequireExactRepositoryCommit keeps exact-match strictness'
+    if ($strictMismatch.Reason -notlike '*-RequireExactRepositoryCommit was requested, so only an exact match is accepted*') {
+        throw "Strict rejection did not report the exact condition. Reported: $($strictMismatch.Reason)"
+    }
+
+    $strictMatch = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit $mainCommit `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot `
+        -RequireExactMatch
+    Assert-Equal `
+        -Actual $strictMatch.Accepted `
+        -Expected $true `
+        -Case 'Explicit -RequireExactRepositoryCommit still accepts the exact SHA'
+
+    $apiOnlyPaths = Test-SreIndexedCommitAcceptance `
+        -IndexedCommit $apiCommit `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot `
+        -ApplicationCodePath @('MercadonaRetail.Api')
+    Assert-Equal `
+        -Actual $apiOnlyPaths.Accepted `
+        -Expected $true `
+        -Case 'Application code paths are an effective parameter'
+
+    Assert-ThrowsLike `
+        -Action {
+            Test-SreIndexedCommitAcceptance `
+                -IndexedCommit $docsCommit `
+                -ExpectedCommit $mainCommit `
+                -RepositoryRoot $testRepositoryRoot `
+                -ApplicationCodePath @('MercadonaRetail.Absent')
+        } `
+        -ExpectedPattern '*could not be determined*fails closed*' `
+        -Case 'Undeterminable application-code commit fails closed'
+
+    Assert-ThrowsLike `
+        -Action {
+            Test-SreIndexedCommitAcceptance `
+                -IndexedCommit $docsCommit `
+                -ExpectedCommit $mainCommit `
+                -RepositoryRoot (Join-Path $testRepositoryRoot 'absent-worktree')
+        } `
+        -ExpectedPattern '*cannot be validated*fails closed*' `
+        -Case 'Missing local repository fails closed'
+
+    $acceptedWaitState = Wait-SreRepositoryReadyAtCommit `
+        -InitialRepository (New-TestRepository -Status Ready -Commit $docsCommit) `
+        -ReadRepository $unexpectedRead `
+        -CreateRepository $null `
+        -RequestSynchronization $null `
+        -RepositoryName $repositoryName `
+        -RepositoryUrl $repositoryUrl `
+        -RepositoryBranch main `
+        -ExpectedCommit $mainCommit `
+        -RepositoryRoot $testRepositoryRoot
+    Assert-Equal `
+        -Actual $acceptedWaitState.Commit `
+        -Expected $docsCommit `
+        -Case 'Wait accepts an ancestor that still contains all application code'
+
+    $waitRejection = Assert-ThrowsLike `
+        -Action {
+            Wait-SreRepositoryReadyAtCommit `
+                -InitialRepository (New-TestRepository -Status Ready -Commit $apiCommit) `
+                -ReadRepository $unexpectedRead `
+                -CreateRepository $null `
+                -RequestSynchronization $null `
+                -RepositoryName $repositoryName `
+                -RepositoryUrl $repositoryUrl `
+                -RepositoryBranch main `
+                -ExpectedCommit $mainCommit `
+                -RepositoryRoot $testRepositoryRoot
+        } `
+        -ExpectedPattern '*is stale*Builder > Knowledge base > Add repository*' `
+        -Case 'Wait rejects an ancestor missing current application code'
+    if ($waitRejection -notlike "*predates the latest application-code commit '$frontendCommit'*") {
+        throw 'Wait rejection did not surface the precise acceptance failure.'
+    }
+
+    $strictWaitRejection = Assert-ThrowsLike `
+        -Action {
+            Wait-SreRepositoryReadyAtCommit `
+                -InitialRepository (New-TestRepository -Status Ready -Commit $docsCommit) `
+                -ReadRepository $unexpectedRead `
+                -CreateRepository $null `
+                -RequestSynchronization $null `
+                -RepositoryName $repositoryName `
+                -RepositoryUrl $repositoryUrl `
+                -RepositoryBranch main `
+                -ExpectedCommit $mainCommit `
+                -RepositoryRoot $testRepositoryRoot `
+                -RequireExactCommitMatch
+        } `
+        -ExpectedPattern '*is stale*' `
+        -Case 'Wait honours explicit strict-commit callers'
+    if ($strictWaitRejection -notlike '*only an exact match is accepted*') {
+        throw 'Strict wait rejection did not surface the strict-mode condition.'
+    }
+} finally {
+    Remove-Item -LiteralPath $testRepositoryRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $verifySource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'verify-sre-agent.ps1') -Raw
+$configureSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'configure-sre-agent.ps1') -Raw
 $preflightSource = Get-Content -LiteralPath $preflightPath -Raw
 $preflightCallIndex = $configureSource.IndexOf(
     '$githubRepositoryPreflight = Invoke-SreGithubRepositoryPreflight',
@@ -631,5 +1117,117 @@ foreach ($requiredField in @('latestCommit', 'lastCommitHash', 'commitId', 'comm
 if ($preflightSource -match '(?im)Write-(Host|Output|Verbose|Information|Warning|Debug|Error).*\$(token|secret|authorization)') {
     throw 'GitHub preflight can write secret-bearing variables.'
 }
+function Get-TestBoundArgument {
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.Language.CommandAst] $Command,
+        [Parameter(Mandatory)]
+        [string] $ParameterName
+    )
 
-Write-Host 'SRE Agent GitHub OAuth and exact repository commit preflight contract passed.'
+    $elements = @($Command.CommandElements)
+    for ($index = 1; $index -lt $elements.Count; $index++) {
+        $element = $elements[$index]
+        if ($element -isnot [System.Management.Automation.Language.CommandParameterAst]) {
+            continue
+        }
+        if (-not [string]::Equals($element.ParameterName, $ParameterName, [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        if ($null -ne $element.Argument) {
+            return $element.Argument.Extent.Text
+        }
+        if ($index + 1 -lt $elements.Count) {
+            return $elements[$index + 1].Extent.Text
+        }
+        return ''
+    }
+
+    return $null
+}
+
+foreach ($callerScript in @('configure-sre-agent.ps1', 'verify-sre-agent.ps1')) {
+    $callerPath = Join-Path $PSScriptRoot $callerScript
+    $callerErrors = $null
+    $callerAst = [System.Management.Automation.Language.Parser]::ParseFile($callerPath, [ref]$null, [ref]$callerErrors)
+    if ($callerErrors -and $callerErrors.Count -gt 0) {
+        throw "$callerScript does not parse."
+    }
+
+    $callerParameters = @($callerAst.ParamBlock.Parameters)
+    $strictParameter = $callerParameters | Where-Object {
+        $_.Name.VariablePath.UserPath -eq 'RequireExactRepositoryCommit'
+    }
+    if (-not $strictParameter) {
+        throw "$callerScript does not expose an explicit -RequireExactRepositoryCommit parameter."
+    }
+    if ($strictParameter.StaticType -ne [switch]) {
+        throw "$callerScript must expose -RequireExactRepositoryCommit as a switch, found '$($strictParameter.StaticType)'."
+    }
+    if (-not ($callerParameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'ExpectedRepositoryCommit' })) {
+        throw "$callerScript no longer accepts -ExpectedRepositoryCommit, breaking existing callers."
+    }
+
+    $strictAssignments = $callerAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Right.Extent.Text -match 'IsNullOrWhiteSpace\(\$ExpectedRepositoryCommit\)'
+        }, $true)
+    if (@($strictAssignments).Count -gt 0) {
+        throw "$callerScript still derives strict commit matching from the presence of -ExpectedRepositoryCommit, which makes the lag-tolerant rule unreachable from the documented runbook."
+    }
+
+    $preflightCalls = @($callerAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                @('Invoke-SreGithubRepositoryPreflight', 'Wait-SreRepositoryReadyAtCommit') -contains $node.GetCommandName()
+            }, $true))
+    if ($preflightCalls.Count -lt 1) {
+        throw "$callerScript does not call the shared repository preflight."
+    }
+
+    foreach ($preflightCall in $preflightCalls) {
+        $callName = $preflightCall.GetCommandName()
+        $callLine = $preflightCall.Extent.StartLineNumber
+
+        $strictArgument = Get-TestBoundArgument -Command $preflightCall -ParameterName 'RequireExactCommitMatch'
+        if ($null -eq $strictArgument) {
+            throw "$callerScript line $callLine calls $callName without -RequireExactCommitMatch, so strict mode is silently lost."
+        }
+        if ($strictArgument -ne '$RequireExactRepositoryCommit') {
+            throw "$callerScript line $callLine binds -RequireExactCommitMatch to '$strictArgument' instead of the explicit -RequireExactRepositoryCommit switch."
+        }
+
+        $rootArgument = Get-TestBoundArgument -Command $preflightCall -ParameterName 'RepositoryRoot'
+        if ($null -eq $rootArgument) {
+            throw "$callerScript line $callLine calls $callName without -RepositoryRoot, so commit ancestry cannot be evaluated."
+        }
+        if ($rootArgument -ne '$repoRoot') {
+            throw "$callerScript line $callLine binds -RepositoryRoot to '$rootArgument' instead of the resolved repository root."
+        }
+
+        $expectedArgument = Get-TestBoundArgument -Command $preflightCall -ParameterName 'ExpectedCommit'
+        if ($expectedArgument -ne '$expectedRepositoryCommit') {
+            throw "$callerScript line $callLine binds -ExpectedCommit to '$expectedArgument' instead of the resolved expected commit."
+        }
+    }
+}
+
+$documentedRunbookFiles = @(
+    'README.md',
+    'docs/guia-demo-paso-a-paso.md',
+    'docs/guion-demo-paridad-grubify.md',
+    'docs/runbooks/cart-memory-pressure.md'
+)
+foreach ($documentedRunbookFile in $documentedRunbookFiles) {
+    $documentedPath = Join-Path (Split-Path $PSScriptRoot -Parent) $documentedRunbookFile
+    if (-not (Test-Path -LiteralPath $documentedPath)) {
+        continue
+    }
+    $documentedText = Get-Content -Raw -LiteralPath $documentedPath
+    if ($documentedText -match '(?m)^\s*[^#\r\n]*\.[\\/]scripts[\\/](configure|verify)-sre-agent\.ps1[^\r\n]*-RequireExactRepositoryCommit') {
+        throw "$documentedRunbookFile documents -RequireExactRepositoryCommit, which would restore the exact-SHA block the lag-tolerant rule exists to remove."
+    }
+}
+
+Write-Host 'SRE Agent GitHub write-capability and repository commit acceptance preflight contract passed.'
