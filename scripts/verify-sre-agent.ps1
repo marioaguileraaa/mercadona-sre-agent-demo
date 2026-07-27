@@ -4,11 +4,19 @@ param(
     [string] $SubscriptionId = '5305e853-a63b-4b82-9a3f-6fde18c1a798',
     [string] $ResourceGroupName = 'rg-mercadona-sre-agent-v1',
     [string] $AgentName = 'sre-agent-mercadona-v1',
+    [string] $RepositoryUrl = 'https://github.com/marioaguileraaa/mercadona-sre-agent-demo',
     [string] $RepositoryName = 'mercadona-sre-agent-demo',
-    [string] $BackendAppName = 'ca-mercadona-retail-api'
+    [string] $BackendAppName = 'ca-mercadona-retail-api',
+    [string] $ExpectedRepositoryCommit = ''
 )
 
 . "$PSScriptRoot\AzureDemo.Common.ps1"
+. "$PSScriptRoot\SreAgent.GitHubPreflight.ps1"
+
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$expectedRepositoryCommit = Resolve-ExpectedRepositoryCommit `
+    -ExpectedRepositoryCommit $ExpectedRepositoryCommit `
+    -RepositoryRoot $repoRoot
 
 function Get-OptionalValue {
     param(
@@ -152,68 +160,25 @@ $endpoint = Get-SreAgentEndpoint `
     -ResourceGroupName $ResourceGroupName `
     -AgentName $AgentName
 
-$repository = Invoke-SreAgentRead -Endpoint $endpoint -Path "/api/v2/repos/$RepositoryName"
-$repositoryStatus = Get-AgentProperty -InputObject $repository -Name 'cloneStatus'
-if ($repositoryStatus -ne 'Ready') {
-    throw "CodeRepo '$RepositoryName' is not Ready. Reported '$repositoryStatus'."
+$readRepository = {
+    Invoke-SreAgentRead -Endpoint $endpoint -Path "/api/v2/repos/$RepositoryName"
 }
+$repository = & $readRepository
 $domainsResponse = Invoke-SreAgentRead -Endpoint $endpoint -Path '/api/v2/github/domains'
-$domains = if ($null -ne $domainsResponse.PSObject.Properties['values']) {
-    @($domainsResponse.values)
-} elseif ($null -ne $domainsResponse.PSObject.Properties['value']) {
-    @($domainsResponse.value)
-} elseif ($null -ne $domainsResponse.PSObject.Properties['domains']) {
-    @($domainsResponse.domains)
-} elseif ($null -ne $domainsResponse.PSObject.Properties['items']) {
-    @($domainsResponse.items)
-} else {
-    @($domainsResponse)
-}
-$githubDomain = $domains | Where-Object {
-    (Get-AgentProperty -InputObject $_ -Name 'name') -in @('github_com', 'github.com') -or
-        (Get-AgentProperty -InputObject $_ -Name 'domain') -in @('github_com', 'github.com')
-} | Select-Object -First 1
-$githubDomainStatus = @(
-    Get-AgentProperty -InputObject $githubDomain -Name 'connectionStatus'
-    Get-AgentProperty -InputObject $githubDomain -Name 'status'
-) | Where-Object { $null -ne $_ } | Select-Object -First 1
-$githubDomainHealthy = Get-AgentProperty -InputObject $githubDomain -Name 'isHealthy'
-if ($null -eq $githubDomain -or
-    ($null -ne $githubDomainHealthy -and $githubDomainHealthy -ne $true) -or
-    ($null -eq $githubDomainHealthy -and
-     $null -ne $githubDomainStatus -and
-     $githubDomainStatus -notin @('Connected', 'Ready', 'Authenticated', 'Succeeded'))) {
-    Write-Host 'Manual step: Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > Sign in, then rerun verification.'
-    throw "INCOMPLETE: authenticated github_com domain is unavailable. Reported '$githubDomainStatus'."
-}
-
 $availableTools = Invoke-SreAgentRead -Endpoint $endpoint -Path '/api/v2/agent/tools'
-$availableToolsJson = $availableTools | ConvertTo-Json -Depth 30 -Compress
-$availableToolNames = @([regex]::Matches(
-        $availableToolsJson,
-        '"(?:name|toolName)"\s*:\s*"([^"]+)"',
-        [Text.RegularExpressions.RegexOptions]::IgnoreCase
-    ) | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
-$requiredGitHubCapabilities = [ordered]@{
-    issue = '(?i)^(issue_write|CreateGithubIssue)$'
-    branch = '(?i)^(create_branch|CreateGithubBranch|CreateBranch)$'
-    contents = '(?i)^(push_files|PushGithubFiles|CommitGithubFiles|CreateGithubCommit|PushFiles)$'
-    pullRequest = '(?i)^(create_pull_request|CreateGithubPullRequest|CreatePullRequest)$'
-}
-$selectedGitHubTools = [System.Collections.Generic.List[string]]::new()
-$missingCapabilities = [System.Collections.Generic.List[string]]::new()
-foreach ($capability in $requiredGitHubCapabilities.GetEnumerator()) {
-    $matchingTool = $availableToolNames | Where-Object { $_ -match $capability.Value } | Select-Object -First 1
-    if ([string]::IsNullOrWhiteSpace($matchingTool)) {
-        $missingCapabilities.Add($capability.Key)
-    } else {
-        $selectedGitHubTools.Add($matchingTool)
-    }
-}
-if ($missingCapabilities.Count -gt 0) {
-    Write-Host 'Manual step: open Builder > Connectors > GitHub OAuth and reconnect with issue, contents and pull-request write access, then rerun verification.'
-    throw "INCOMPLETE: GitHub tools did not expose required capabilities: $($missingCapabilities -join ', ')."
-}
+$githubRepositoryPreflight = Invoke-SreGithubRepositoryPreflight `
+    -DomainsResponse $domainsResponse `
+    -ToolsResponse $availableTools `
+    -InitialRepository $repository `
+    -ReadRepository $readRepository `
+    -CreateRepository $null `
+    -RequestSynchronization $null `
+    -RepositoryName $RepositoryName `
+    -RepositoryUrl $RepositoryUrl `
+    -RepositoryBranch 'main' `
+    -ExpectedCommit $expectedRepositoryCommit
+$selectedGitHubTools = @($githubRepositoryPreflight.SelectedTools)
+$repositoryState = $githubRepositoryPreflight.Repository
 
 $handler = Invoke-SreAgentRead -Endpoint $endpoint -Path '/api/v2/extendedAgent/agents/incident-handler'
 $handlerInstructions = [string](Get-AgentProperty -InputObject $handler -Name 'instructions')
@@ -238,7 +203,7 @@ foreach ($requiredGitHubTool in $selectedGitHubTools) {
 foreach ($requiredInstruction in @(
         'DEMO_CART_MEMORY_MB_PER_ADD=0',
         'DEMO_CART_MEMORY_FAILURE_MB=0',
-        'create_pull_request',
+        'exact authenticated GitHub write tools',
         'Never merge',
         'Never execute this write until the operator explicitly approves'
     )) {
@@ -300,4 +265,4 @@ foreach ($requiredAsk in @('RunAzCliWriteCommands') + @($selectedGitHubTools)) {
     }
 }
 
-Write-Host 'SRE Agent verification passed: Review/Low, 5xx Sev3, exact response plan, Ready CodeRepo, connected GitHub issue/PR capabilities, and merge/workflow/deploy denies.'
+Write-Host "SRE Agent verification passed: Review/Low, 5xx Sev3, exact response plan, Ready CodeRepo at $($repositoryState.Commit), connected GitHub issue-create/update/branch/contents/PR-create capabilities, and merge/workflow/deploy denies."

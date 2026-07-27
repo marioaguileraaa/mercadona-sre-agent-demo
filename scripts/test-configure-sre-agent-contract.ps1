@@ -6,6 +6,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $scriptPath = Join-Path $PSScriptRoot 'configure-sre-agent.ps1'
+$preflightPath = Join-Path $PSScriptRoot 'SreAgent.GitHubPreflight.ps1'
 $tokens = $null
 $parseErrors = $null
 $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -256,6 +257,8 @@ Assert-Equal `
     -Case 'Top-level triggerId fallback'
 
 $source = Get-Content -LiteralPath $scriptPath -Raw
+$preflightSource = Get-Content -LiteralPath $preflightPath -Raw
+$combinedSource = $source + $preflightSource
 $sensitiveVariablePattern = '(?i)\$(?:[A-Za-z]+:)?[A-Za-z0-9_]*(?:accessToken|token|payload)[A-Za-z0-9_]*'
 $disallowedSensitiveCommands = @(
     'Set-Content',
@@ -340,7 +343,7 @@ foreach ($requiredContract in @(
         'monthlyAgentUnitLimit',
         'Bearer $accessToken'
     )) {
-    if (-not $source.Contains($requiredContract, [StringComparison]::Ordinal)) {
+    if (-not $combinedSource.Contains($requiredContract, [StringComparison]::Ordinal)) {
         throw "Required Mercadona contract was not preserved: '$requiredContract'"
     }
 }

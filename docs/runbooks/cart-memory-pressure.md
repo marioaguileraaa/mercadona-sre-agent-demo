@@ -32,7 +32,9 @@ The service touches each page and keeps a process-lifetime strong root only afte
 
 ```powershell
 az account set --subscription 5305e853-a63b-4b82-9a3f-6fde18c1a798
-.\scripts\verify-sre-agent.ps1
+git fetch origin main
+$expectedCommit = (git rev-parse origin/main).Trim()
+.\scripts\verify-sre-agent.ps1 -ExpectedRepositoryCommit $expectedCommit
 .\scripts\start-incident.ps1
 ```
 
@@ -42,7 +44,7 @@ The start script refuses to mutate unless:
 - per-add and failure variables are both zero, and the cap is 640;
 - the healthy add returns HTTP 200 with no allocation;
 - no recent 5xx or already-Fired matching alert exists;
-- the agent is Review/Low, the GitHub connector domain is authenticated, CodeRepo is Ready, GitHub exposes issue/branch/commit/PR tools, and the response plan is exact.
+- the agent is Review/Low, the `github.com` OAuth domain is healthy, CodeRepo URL/type/`main` is Ready at the exact full expected SHA, GitHub exposes issue-create/update/branch/contents/PR-create writes, and the response plan is exact.
 
 The finite injector preserves `X-Correlation-ID`, counts only actual HTTP 5xx, and stops at six 5xx, 80 requests or five minutes. Transport failures are not counted. It then verifies the platform metric, exact Fired alert, and a new agent thread. If the preview thread API does not expose response-plan metadata, it reports the one manual portal check rather than claiming an association.
 
@@ -109,7 +111,9 @@ DEMO_CART_MEMORY_MAX_MB=640
 
 A human must approve before the Azure write. After approval and healthy-flow verification, the agent can create a synthetic issue, branch, commit and pull request through the authenticated GitHub connector tools. It must not merge, dispatch workflows, deploy the PR or close the issue automatically. Global tool policy asks before writes and denies merge/workflow/deploy tools.
 
-If GitHub OAuth or a required capability is missing, configuration and verification stop with `INCOMPLETE`. Complete only **Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > Sign in**, enable issue/contents/pull-request writes, and rerun. Never paste tokens into source or output.
+If GitHub OAuth or a required write is missing, configuration and verification stop with `INCOMPLETE` before Agent API mutations. Complete exactly **Azure SRE Agent portal > Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests**, then rerun configure and verify with the same full expected SHA. Never paste tokens into source or output.
+
+If CodeRepo is `Ready` at a different SHA, no supported synchronization endpoint is documented. Complete **Azure SRE Agent portal > Builder > Knowledge base > Add repository > remove the stale row, confirm, then add the same repository again**, wait for `Ready`, and rerun. Do not automate OAuth, delete/recreate the repository silently, or claim readiness without an exact full-SHA match.
 
 ## GitHub bridge fallback
 

@@ -11,7 +11,8 @@ $paths = @(
     "$PSScriptRoot\start-incident.ps1",
     "$PSScriptRoot\recover-incident.ps1",
     "$PSScriptRoot\verify-sre-agent.ps1",
-    "$PSScriptRoot\configure-sre-agent.ps1"
+    "$PSScriptRoot\configure-sre-agent.ps1",
+    "$PSScriptRoot\SreAgent.GitHubPreflight.ps1"
 )
 foreach ($path in $paths) {
     $tokens = $null
@@ -30,6 +31,7 @@ $start = Get-Content -LiteralPath "$PSScriptRoot\start-incident.ps1" -Raw
 $recover = Get-Content -LiteralPath "$PSScriptRoot\recover-incident.ps1" -Raw
 $verify = Get-Content -LiteralPath "$PSScriptRoot\verify-sre-agent.ps1" -Raw
 $configure = Get-Content -LiteralPath "$PSScriptRoot\configure-sre-agent.ps1" -Raw
+$githubPreflight = Get-Content -LiteralPath "$PSScriptRoot\SreAgent.GitHubPreflight.ps1" -Raw
 $common = Get-Content -LiteralPath "$PSScriptRoot\AzureDemo.Common.ps1" -Raw
 $bicep = Get-Content -LiteralPath "$repoRoot\infra\main.bicep" -Raw
 
@@ -115,12 +117,12 @@ foreach ($required in @(
         'targetResource',
         'incident-handler'
     )) {
-    if (-not ($verify + $configure).Contains($required, [StringComparison]::OrdinalIgnoreCase)) {
+    if (-not ($verify + $configure + $githubPreflight).Contains($required, [StringComparison]::OrdinalIgnoreCase)) {
         throw "SRE verification/configuration contract is missing '$required'."
     }
 }
 foreach ($forbidden in @('merge_pull_request', 'run_workflow', 'workflow_dispatch')) {
-    if (($verify + $configure) -match "(?i)['`"]$([regex]::Escape($forbidden))['`"]") {
+    if (($verify + $configure + $githubPreflight) -match "(?i)['`"]$([regex]::Escape($forbidden))['`"]") {
         throw "A forbidden GitHub capability '$forbidden' was granted explicitly."
     }
 }
