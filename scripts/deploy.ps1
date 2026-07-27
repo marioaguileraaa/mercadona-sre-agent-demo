@@ -47,18 +47,12 @@ function Invoke-GuardedGroupDeployment {
         'deployment', 'group', 'what-if'
     ) + $baseArguments + @(
         '--result-format', 'FullResourcePayloads',
+        '--no-pretty-print',
         '--output', 'json'
     )
-    $whatIfJson = & az @whatIfArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Deployment what-if failed for '$DeploymentName'."
-    }
-    try {
-        $whatIf = ($whatIfJson -join [Environment]::NewLine) |
-            ConvertFrom-Json -Depth 100
-    } catch {
-        throw "Deployment what-if for '$DeploymentName' did not return valid JSON."
-    }
+    $whatIf = Invoke-SreAgentWhatIfJson `
+        -Arguments $whatIfArguments `
+        -DeploymentName $DeploymentName
     Assert-SreAgentWhatIfSafe `
         -WhatIf $whatIf `
         -AgentResourceId $agentResourceId `
