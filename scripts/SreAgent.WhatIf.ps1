@@ -231,6 +231,151 @@ function Assert-SreAgentManagedResourceDeltaSafe {
     }
 }
 
+function Test-SreAgentUnsupportedRoleAssignment {
+    param(
+        [Parameter(Mandatory)]
+        [object] $Change,
+        [Parameter(Mandatory)]
+        [string] $ResourceId,
+        [Parameter(Mandatory)]
+        [string] $ChangeType
+    )
+
+    if (-not [string]::Equals(
+            $ChangeType,
+            'Unsupported',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $ResourceId -notmatch '(?i)/providers/Microsoft\.Authorization/roleAssignments/[^/]+$') {
+        return $false
+    }
+
+    $expectedType = 'Microsoft.Authorization/roleAssignments'
+    $payloads = [System.Collections.Generic.List[object]]::new()
+    $payloads.Add($Change)
+    foreach ($propertyName in @('before', 'after')) {
+        $payloadState = Get-SreAgentWhatIfProperty `
+            -InputObject $Change `
+            -Name $propertyName
+        if ($payloadState.Found -and $null -ne $payloadState.Value) {
+            $payloads.Add($payloadState.Value)
+        }
+    }
+    foreach ($payload in $payloads) {
+        $typeState = Get-SreAgentWhatIfProperty -InputObject $payload -Name 'type'
+        if ($typeState.Found -and
+            (-not [string]::Equals(
+                    [string] $typeState.Value,
+                    $expectedType,
+                    [StringComparison]::OrdinalIgnoreCase
+                ))) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Assert-SreAgentWhatIfChangeSafe {
+    param(
+        [Parameter(Mandatory)]
+        [object] $Change,
+        [Parameter(Mandatory)]
+        [bool] $IsPotential,
+        [Parameter(Mandatory)]
+        [string] $AgentResourceId,
+        [Parameter(Mandatory)]
+        [string] $ArcResourceGroupId,
+        [Parameter(Mandatory)]
+        [string[]] $RequiredManagedResourceIds
+    )
+
+    $resourceIdState = Get-SreAgentWhatIfProperty -InputObject $Change -Name 'resourceId'
+    $changeTypeState = Get-SreAgentWhatIfProperty -InputObject $Change -Name 'changeType'
+    $resourceId = if ($resourceIdState.Found) { [string] $resourceIdState.Value } else { '' }
+    $changeType = if ($changeTypeState.Found) { [string] $changeTypeState.Value } else { '' }
+    $changeKind = if ($IsPotential) { 'potential change' } else { 'change' }
+    if ([string]::IsNullOrWhiteSpace($resourceId) -or
+        [string]::IsNullOrWhiteSpace($changeType)) {
+        throw "Deployment what-if $changeKind did not contain nonblank resourceId and changeType values."
+    }
+
+    $normalizedResourceId = ConvertTo-SreAgentNormalizedResourceId -ResourceId $resourceId
+    $normalizedAgentResourceId = ConvertTo-SreAgentNormalizedResourceId `
+        -ResourceId $AgentResourceId
+    $normalizedArcResourceGroupId = ConvertTo-SreAgentNormalizedResourceId `
+        -ResourceId $ArcResourceGroupId
+    $isAgent = $normalizedResourceId -eq $normalizedAgentResourceId
+    $isAgentChild = $normalizedResourceId.StartsWith(
+        "$normalizedAgentResourceId/",
+        [StringComparison]::OrdinalIgnoreCase
+    )
+    $isArcScope = $normalizedResourceId -eq $normalizedArcResourceGroupId -or
+        $normalizedResourceId.StartsWith(
+            "$normalizedArcResourceGroupId/",
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    $isAllowedUnsupportedRoleAssignment = Test-SreAgentUnsupportedRoleAssignment `
+        -Change $Change `
+        -ResourceId $resourceId `
+        -ChangeType $changeType
+
+    if ($isAllowedUnsupportedRoleAssignment) {
+        return
+    }
+    if ($isArcScope -and
+        ($IsPotential -or
+            $changeType -in @('Create', 'Delete', 'Deploy', 'Modify', 'Unsupported'))) {
+        throw "Deployment what-if contains unexpected Arc-scope $changeType for '$resourceId'."
+    }
+    if ($IsPotential -and $isAgentChild) {
+        throw "Deployment what-if contains unexpected SRE Agent child potential change $changeType for '$resourceId'."
+    }
+    if (-not $isAgent) {
+        return
+    }
+    if ($changeType -eq 'Delete') {
+        throw "Deployment what-if would delete SRE Agent '$AgentResourceId'."
+    }
+    if ($changeType -eq 'Unsupported') {
+        throw "Deployment what-if could not evaluate SRE Agent '$AgentResourceId'."
+    }
+    if ($changeType -notin @('Create', 'Deploy', 'Modify')) {
+        if ($IsPotential) {
+            throw "Deployment what-if contains unsupported SRE Agent potential change type '$changeType'."
+        }
+        return
+    }
+
+    $afterState = Get-SreAgentWhatIfProperty -InputObject $Change -Name 'after'
+    if ($afterState.Found -and $null -ne $afterState.Value) {
+        $managedResources = Get-SreAgentManagedResourcesState `
+            -AgentPayload $afterState.Value
+        if (-not $managedResources.Found) {
+            throw 'Deployment what-if SRE Agent payload did not contain managedResources.'
+        }
+        Assert-SreAgentManagedResourcesPresent `
+            -ManagedResources $managedResources.Values `
+            -RequiredManagedResourceIds $RequiredManagedResourceIds `
+            -Context 'Deployment what-if SRE Agent payload'
+    } elseif ($changeType -in @('Create', 'Deploy')) {
+        throw 'Deployment what-if did not expose the created SRE Agent payload.'
+    }
+
+    $deltaState = Get-SreAgentWhatIfProperty -InputObject $Change -Name 'delta'
+    if ($deltaState.Found -and $null -ne $deltaState.Value) {
+        if ($deltaState.Value -isnot [System.Collections.IList]) {
+            throw "Deployment what-if SRE Agent $changeKind delta was not an array."
+        }
+        Assert-SreAgentManagedResourceDeltaSafe `
+            -Delta @($deltaState.Value) `
+            -RequiredManagedResourceIds $RequiredManagedResourceIds
+    } elseif ($IsPotential -and
+        (-not $afterState.Found -or $null -eq $afterState.Value)) {
+        throw 'Deployment what-if SRE Agent potential change did not expose an after payload or delta.'
+    }
+}
+
 function Assert-SreAgentWhatIfSafe {
     [CmdletBinding()]
     param(
@@ -247,76 +392,56 @@ function Assert-SreAgentWhatIfSafe {
         [string[]] $RequiredManagedResourceIds
     )
 
-    $changesState = Get-SreAgentWhatIfProperty -InputObject $WhatIf -Name 'changes'
-    if (-not $changesState.Found) {
-        $propertiesState = Get-SreAgentWhatIfProperty -InputObject $WhatIf -Name 'properties'
-        if ($propertiesState.Found) {
-            $changesState = Get-SreAgentWhatIfProperty `
-                -InputObject $propertiesState.Value `
-                -Name 'changes'
+    $propertiesState = Get-SreAgentWhatIfProperty -InputObject $WhatIf -Name 'properties'
+    $containers = [System.Collections.Generic.List[object]]::new()
+    $containers.Add([pscustomobject]@{ Name = 'root'; Value = $WhatIf })
+    if ($propertiesState.Found -and $null -ne $propertiesState.Value) {
+        $containers.Add([pscustomobject]@{
+                Name = 'properties'
+                Value = $propertiesState.Value
+            })
+    }
+
+    $changeCollections = [System.Collections.Generic.List[object]]::new()
+    foreach ($container in $containers) {
+        foreach ($collectionName in @('changes', 'potentialChanges')) {
+            $collectionState = Get-SreAgentWhatIfProperty `
+                -InputObject $container.Value `
+                -Name $collectionName
+            if (-not $collectionState.Found) {
+                continue
+            }
+            if ($null -eq $collectionState.Value -and
+                $collectionName -eq 'potentialChanges') {
+                continue
+            }
+            if ($null -eq $collectionState.Value -or
+                $collectionState.Value -isnot [System.Collections.IList]) {
+                throw "Deployment what-if $($container.Name).$collectionName was not an array."
+            }
+            $changeCollections.Add([pscustomobject]@{
+                    Name = "$($container.Name).$collectionName"
+                    IsPotential = $collectionName -eq 'potentialChanges'
+                    Value = $collectionState.Value
+                })
         }
     }
-    if (-not $changesState.Found -or $null -eq $changesState.Value) {
+    if (-not ($changeCollections | Where-Object { -not $_.IsPotential })) {
         throw 'Deployment what-if JSON did not contain a changes array.'
     }
 
-    $normalizedAgentResourceId = ConvertTo-SreAgentNormalizedResourceId `
-        -ResourceId $AgentResourceId
-    $normalizedArcResourceGroupId = ConvertTo-SreAgentNormalizedResourceId `
-        -ResourceId $ArcResourceGroupId
-    $mutatingChangeTypes = @('Create', 'Delete', 'Deploy', 'Modify')
-
-    foreach ($change in @($changesState.Value)) {
-        $resourceIdState = Get-SreAgentWhatIfProperty -InputObject $change -Name 'resourceId'
-        $changeTypeState = Get-SreAgentWhatIfProperty -InputObject $change -Name 'changeType'
-        $resourceId = if ($resourceIdState.Found) { [string] $resourceIdState.Value } else { '' }
-        $changeType = if ($changeTypeState.Found) { [string] $changeTypeState.Value } else { '' }
-        $normalizedResourceId = if ([string]::IsNullOrWhiteSpace($resourceId)) {
-            ''
-        } else {
-            ConvertTo-SreAgentNormalizedResourceId -ResourceId $resourceId
-        }
-
-        if (($normalizedResourceId -eq $normalizedArcResourceGroupId -or
-                $normalizedResourceId.StartsWith(
-                    "$normalizedArcResourceGroupId/",
-                    [StringComparison]::OrdinalIgnoreCase
-                )) -and
-            $changeType -in $mutatingChangeTypes) {
-            throw "Deployment what-if contains unexpected Arc-scope $changeType for '$resourceId'."
-        }
-        if ($normalizedResourceId -ne $normalizedAgentResourceId) {
-            continue
-        }
-        if ($changeType -eq 'Delete') {
-            throw "Deployment what-if would delete SRE Agent '$AgentResourceId'."
-        }
-        if ($changeType -eq 'Unsupported') {
-            throw "Deployment what-if could not evaluate SRE Agent '$AgentResourceId'."
-        }
-        if ($changeType -notin @('Create', 'Deploy', 'Modify')) {
-            continue
-        }
-
-        $afterState = Get-SreAgentWhatIfProperty -InputObject $change -Name 'after'
-        if ($afterState.Found -and $null -ne $afterState.Value) {
-            $managedResources = Get-SreAgentManagedResourcesState `
-                -AgentPayload $afterState.Value
-            if (-not $managedResources.Found) {
-                throw 'Deployment what-if SRE Agent payload did not contain managedResources.'
+    foreach ($collection in $changeCollections) {
+        foreach ($change in @($collection.Value)) {
+            if ($null -eq $change -or
+                $change -is [string] -or
+                $change -is [System.ValueType]) {
+                throw "Deployment what-if $($collection.Name) contained a malformed entry."
             }
-            Assert-SreAgentManagedResourcesPresent `
-                -ManagedResources $managedResources.Values `
-                -RequiredManagedResourceIds $RequiredManagedResourceIds `
-                -Context 'Deployment what-if SRE Agent payload'
-        } elseif ($changeType -in @('Create', 'Deploy')) {
-            throw 'Deployment what-if did not expose the created SRE Agent payload.'
-        }
-
-        $deltaState = Get-SreAgentWhatIfProperty -InputObject $change -Name 'delta'
-        if ($deltaState.Found -and $null -ne $deltaState.Value) {
-            Assert-SreAgentManagedResourceDeltaSafe `
-                -Delta @($deltaState.Value) `
+            Assert-SreAgentWhatIfChangeSafe `
+                -Change $change `
+                -IsPotential $collection.IsPotential `
+                -AgentResourceId $AgentResourceId `
+                -ArcResourceGroupId $ArcResourceGroupId `
                 -RequiredManagedResourceIds $RequiredManagedResourceIds
         }
     }

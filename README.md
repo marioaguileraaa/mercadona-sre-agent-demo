@@ -78,7 +78,7 @@ az account set --subscription 5305e853-a63b-4b82-9a3f-6fde18c1a798
 .\scripts\deploy.ps1 -ArcResourceGroupName rg-arcbox-itpro-weu-002
 ```
 
-`deploy.ps1` performs two convergent Bicep passes: placeholder images first, remote ACR builds from each project directory second, then immutable tagged images. Before each create it requests full JSON what-if payloads and aborts if either the retail or Arc managed-resource ID would be removed from the SRE Agent, or if the deployment unexpectedly mutates an Arc-scope resource. It waits for `Healthy` plus `Running`, `RunningAtMinScale`, or `RunningAtMaxScale`, then verifies API health, stores, cart, valid add, order, tracking, frontend text, and same-origin health. Created responses retain `-MaximumRedirection 0`.
+`deploy.ps1` performs two convergent Bicep passes: placeholder images first, remote ACR builds from each project directory second, then immutable tagged images. Before each create it inspects both current and potential changes in the full JSON what-if payload and aborts if either the retail or Arc managed-resource ID would be removed from the SRE Agent, or if any non-allowlisted potential entry targets the SRE Agent or an Arc-scope resource. Only an exact `Microsoft.Authorization/roleAssignments` `Unsupported` result is tolerated. It waits for `Healthy` plus `Running`, `RunningAtMinScale`, or `RunningAtMaxScale`, then verifies API health, stores, cart, valid add, order, tracking, frontend text, and same-origin health. Created responses retain `-MaximumRedirection 0`.
 
 Configure the independent agent only after infrastructure succeeds:
 

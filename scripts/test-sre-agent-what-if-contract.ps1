@@ -17,6 +17,28 @@ $arcResourceGroupId = "/subscriptions/$($fixture.subscriptionId)/resourceGroups/
 $agentResourceId = "$retailResourceGroupId/providers/Microsoft.App/agents/$($fixture.agentName)"
 $requiredManagedResources = @($retailResourceGroupId, $arcResourceGroupId)
 
+$requiredCaseNames = @(
+    'Arc machine Unsupported',
+    'Arc role assignment Unsupported',
+    'Arc role assignment potential Unsupported',
+    'role assignment substring Unsupported',
+    'role assignment mismatched type Unsupported',
+    'Arc Modify only in potentialChanges',
+    'Arc NoChange only in potentialChanges',
+    'SRE NoChange only in potentialChanges',
+    'SRE child Ignore only in potentialChanges',
+    'SRE Arc delete only in potentialChanges',
+    'SRE replacement only in potentialChanges',
+    'malformed potentialChanges',
+    'safe empty potentialChanges',
+    'compatible null potentialChanges'
+)
+foreach ($requiredCaseName in $requiredCaseNames) {
+    if ($requiredCaseName -notin @($fixture.cases.name)) {
+        throw "Required dynamic what-if fixture '$requiredCaseName' was not found."
+    }
+}
+
 foreach ($case in $fixture.cases) {
     $errorMessage = $null
     try {
