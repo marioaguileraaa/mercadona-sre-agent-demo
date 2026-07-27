@@ -345,6 +345,7 @@ resource sreIdentityAgentAdministrator 'Microsoft.Authorization/roleAssignments@
   }
 }
 
+#disable-next-line BCP081
 resource logAnalyticsConnector 'Microsoft.App/agents/connectors@2025-05-01-preview' = {
   parent: sreAgent
   name: 'log-analytics'
@@ -361,6 +362,7 @@ resource logAnalyticsConnector 'Microsoft.App/agents/connectors@2025-05-01-previ
   }
 }
 
+#disable-next-line BCP081
 resource appInsightsConnector 'Microsoft.App/agents/connectors@2025-05-01-preview' = {
   parent: sreAgent
   name: 'application-insights'

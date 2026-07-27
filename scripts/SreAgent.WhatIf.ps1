@@ -376,6 +376,128 @@ function Assert-SreAgentWhatIfChangeSafe {
     }
 }
 
+function Format-SreAgentWhatIfStreamExcerpt {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Label,
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $Content,
+        [ValidateRange(1, 65536)]
+        [int] $MaxCharacters = 2000
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Content)) {
+        return "$Label was empty."
+    }
+
+    $excerpt = $Content.Trim()
+    $isTruncated = $excerpt.Length -gt $MaxCharacters
+    if ($isTruncated) {
+        $excerpt = $excerpt.Substring(0, $MaxCharacters)
+    }
+    $excerpt = [regex]::Replace(
+        $excerpt,
+        '(?i)(instrumentationkey|accountkey|sharedaccesskey|primarykey|secondarykey|password|pwd|clientsecret|client_secret|apikey|api_key|accesstoken|access_token|refreshtoken|token|secret|sig)("?\s*[=:]\s*"?)[^"\s,;&}]+',
+        '$1$2[redacted]'
+    )
+    $excerpt = [regex]::Replace($excerpt, '\s+', ' ').Trim()
+    if ($excerpt.Length -gt $MaxCharacters) {
+        $excerpt = $excerpt.Substring(0, $MaxCharacters)
+        $isTruncated = $true
+    }
+    if ($isTruncated) {
+        $excerpt += " [truncated at $MaxCharacters characters]"
+    }
+    return "${Label}: $excerpt"
+}
+
+function Invoke-SreAgentWhatIfJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateCount(1, 200)]
+        [string[]] $Arguments,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $DeploymentName,
+        [ValidateRange(1, 65536)]
+        [int] $MaxExcerptCharacters = 2000
+    )
+
+    foreach ($requiredArgument in @('what-if', '--no-pretty-print')) {
+        if ($requiredArgument -notin $Arguments) {
+            throw "Deployment what-if for '$DeploymentName' must be invoked with '$requiredArgument'."
+        }
+    }
+
+    $standardErrorPath = [System.IO.Path]::GetTempFileName()
+    try {
+        # Keep the explicit exit-code check below reachable. Under
+        # $ErrorActionPreference 'Stop', PowerShell 7.4+ turns a nonzero native exit code
+        # into a terminating NativeCommandExitException when
+        # $PSNativeCommandUseErrorActionPreference is enabled, and Windows PowerShell turns
+        # native stderr output into a terminating NativeCommandError. Either one would
+        # bypass the diagnostic excerpts below. Both overrides are function-scoped.
+        $PSNativeCommandUseErrorActionPreference = $false
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $standardOutput = & az @Arguments 2> $standardErrorPath
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        $standardOutputText = @(
+            @($standardOutput) | ForEach-Object { [string] $_ }
+        ) -join [Environment]::NewLine
+        $standardErrorText = ''
+        if (Test-Path -LiteralPath $standardErrorPath -PathType Leaf) {
+            $standardErrorText = [string] (
+                Get-Content -LiteralPath $standardErrorPath -Raw -ErrorAction SilentlyContinue
+            )
+        }
+        $formatDiagnostic = {
+            @(
+                (Format-SreAgentWhatIfStreamExcerpt `
+                        -Label 'az stdout' `
+                        -Content $standardOutputText `
+                        -MaxCharacters $MaxExcerptCharacters),
+                (Format-SreAgentWhatIfStreamExcerpt `
+                        -Label 'az stderr' `
+                        -Content $standardErrorText `
+                        -MaxCharacters $MaxExcerptCharacters)
+            ) -join ' '
+        }
+
+        if ($exitCode -ne 0) {
+            throw "Deployment what-if failed for '$DeploymentName' with exit code $exitCode. $(& $formatDiagnostic)"
+        }
+
+        $whatIf = $null
+        $parseError = ''
+        if (-not [string]::IsNullOrWhiteSpace($standardOutputText)) {
+            try {
+                $whatIf = $standardOutputText | ConvertFrom-Json -Depth 100
+            } catch {
+                $parseError = " Parse error: $($_.Exception.Message)"
+            }
+        }
+        if ($null -eq $whatIf -or
+            $whatIf -is [string] -or
+            $whatIf -is [System.ValueType]) {
+            throw "Deployment what-if for '$DeploymentName' did not return valid JSON.$parseError $(& $formatDiagnostic)"
+        }
+
+        return $whatIf
+    } finally {
+        if (Test-Path -LiteralPath $standardErrorPath -PathType Leaf) {
+            Remove-Item -LiteralPath $standardErrorPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Assert-SreAgentWhatIfSafe {
     [CmdletBinding()]
     param(
