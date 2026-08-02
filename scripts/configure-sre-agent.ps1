@@ -454,6 +454,79 @@ function Sync-RetailIncidentFilters {
     }
 }
 
+function Format-AgentApiFailure {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Method,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Path,
+        [Parameter(Mandatory)]
+        [ValidateRange(100, 599)]
+        [int] $StatusCode,
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $ReasonPhrase,
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $ResponseBody,
+        [ValidateRange(1, 65536)]
+        [int] $MaxCharacters = 2000,
+        [switch] $ResponseBodyReadFailed
+    )
+
+    $status = "HTTP $StatusCode"
+    if (-not [string]::IsNullOrWhiteSpace($ReasonPhrase)) {
+        $status += " ($($ReasonPhrase.Trim()))"
+    }
+    $prefix = "Azure SRE Agent data-plane request $($Method.ToUpperInvariant()) $Path failed with $status."
+    if ($ResponseBodyReadFailed) {
+        return "$prefix Response body could not be read."
+    }
+    if ([string]::IsNullOrWhiteSpace($ResponseBody)) {
+        return "$prefix Response body was empty."
+    }
+
+    $excerpt = $ResponseBody.Trim()
+    $isTruncated = $excerpt.Length -gt $MaxCharacters
+    $trimToBudget = {
+        param(
+            [string] $Value,
+            [int] $Budget
+        )
+
+        if ($Value.Length -le $Budget) {
+            return $Value
+        }
+        $keptLength = $Budget
+        if ($keptLength -gt 0 -and [char]::IsHighSurrogate($Value[$keptLength - 1])) {
+            $keptLength--
+        }
+        return $Value.Substring(0, $keptLength)
+    }
+    $excerpt = & $trimToBudget $excerpt $MaxCharacters
+    # Redact quoted values whole - stopping at the first space or comma would leave the
+    # rest of a credential in the message - and delimiter-bounded unquoted values.
+    $secretNamePattern = 'instrumentationkey|accountkey|sharedaccesskey|primarykey|secondarykey|' +
+        'password|pwd|clientsecret|client_secret|apikey|api_key|accesstoken|access_token|' +
+        'refreshtoken|token|secret|sig'
+    $excerpt = [regex]::Replace(
+        $excerpt,
+        "(?i)($secretNamePattern)(`"?\s*[=:]\s*)(`")?(?(3)(?:\\.|[^`"\\])*|[^`"\s,;&}]+)",
+        '$1$2$3[redacted]'
+    )
+    $excerpt = [regex]::Replace($excerpt, '\s+', ' ').Trim()
+    if ($excerpt.Length -gt $MaxCharacters) {
+        $excerpt = & $trimToBudget $excerpt $MaxCharacters
+        $isTruncated = $true
+    }
+    if ($isTruncated) {
+        $excerpt += " [truncated at $MaxCharacters characters]"
+    }
+    return "$prefix Response body: $excerpt"
+}
+
 function Invoke-AgentApi {
     param(
         [Parameter(Mandatory)]
@@ -493,12 +566,30 @@ function Invoke-AgentApi {
             )
         }
 
+        # Read the response body before any success check so a 4xx/5xx validation payload
+        # survives the finally-block disposal below. EnsureSuccessStatusCode would discard it.
         $response = $script:agentHttpClient.Send($request)
-        $response.EnsureSuccessStatusCode() | Out-Null
-        if ($null -eq $response.Content) {
-            return $null
+        $responseBody = $null
+        $responseBodyReadFailed = $false
+        if ($null -ne $response.Content) {
+            try {
+                $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            } catch {
+                $responseBodyReadFailed = $true
+            }
         }
-        $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            throw (Format-AgentApiFailure `
+                    -Method $Method `
+                    -Path $Path `
+                    -StatusCode ([int] $response.StatusCode) `
+                    -ReasonPhrase $response.ReasonPhrase `
+                    -ResponseBody $responseBody `
+                    -ResponseBodyReadFailed:$responseBodyReadFailed)
+        }
+        if ($responseBodyReadFailed) {
+            throw "Azure SRE Agent data-plane request $($Method.ToUpperInvariant()) $Path returned HTTP $([int] $response.StatusCode), but its response body could not be read."
+        }
         if ([string]::IsNullOrWhiteSpace($responseBody)) {
             return $null
         }
@@ -705,27 +796,50 @@ Only after that approval, create a GitHub issue with Summary, Impact, Timeline, 
 }
 Invoke-AgentApi -Method Put -Path "/api/v2/extendedAgent/agents/$incidentHandlerName" -Body $incidentHandler | Out-Null
 
-$incidentFilter = @{
-    name = $incidentFilterName
-    type = 'IncidentFilter'
-    tags = @('mercadona-demo')
-    properties = @{
-        incidentPlatform = 'AzMonitor'
-        isEnabled = $true
-        priorities = @('Sev3')
-        alertId = $cartAlertResourceId
-        titleContains = $cartAlertName
-        azMonitorFilterSettings = @{
-            targetResourceType = 'Microsoft.App/containerApps'
-            targetResource = $backendResourceId
+function New-RetailIncidentFilterPayload {
+    # Exactly the field set the Azure SRE Agent IncidentFilter API has accepted for this demo.
+    # Scoping is by incident title only, and that is deliberate:
+    #   * Azure Monitor incident titles embed the alert rule name (the previous synthetic
+    #     incident of this demo was titled '[Sev2] alert-mercadona-cart-memory'), so
+    #     titleContains set to the full deployed rule name binds this plan to that single
+    #     rule. It is strictly narrower than the legacy Sev2 cart filter, which matches on
+    #     'mercadona'.
+    #   * alertId, azMonitorFilterSettings and mergeEnabled are intentionally omitted. The
+    #     API rejected that shape with HTTP 400, and the two filters it did accept carry an
+    #     empty alertId and an empty azMonitorFilterSettings. Do not "restore" them: it
+    #     reintroduces the 400 and buys no scoping that titleContains does not already give.
+    $retailIncidentFilter = @{
+        name = $incidentFilterName
+        type = 'IncidentFilter'
+        tags = @('mercadona-demo')
+        properties = @{
+            incidentPlatform = 'AzMonitor'
+            isEnabled = $true
+            priorities = @('Sev3')
+            titleContains = $cartAlertName
+            handlingAgent = $incidentHandlerName
+            agentMode = 'Review'
+            deepInvestigationEnabled = $true
+            maxAutomatedInvestigationAttempts = 3
         }
-        handlingAgent = $incidentHandlerName
-        agentMode = 'Review'
-        deepInvestigationEnabled = $true
-        maxAutomatedInvestigationAttempts = 3
-        mergeEnabled = $false
     }
+
+    foreach ($rejectedProperty in @('alertId', 'azMonitorFilterSettings', 'mergeEnabled')) {
+        if ($retailIncidentFilter.properties.ContainsKey($rejectedProperty)) {
+            throw "The retail IncidentFilter payload must not send '$rejectedProperty'; the Azure SRE Agent API rejects that shape with HTTP 400."
+        }
+    }
+    if (-not [string]::Equals(
+            [string] $retailIncidentFilter.properties.titleContains,
+            [string] $cartAlertName,
+            [StringComparison]::Ordinal
+        )) {
+        throw 'The retail IncidentFilter must stay scoped to the exact deployed retail alert rule name.'
+    }
+    return $retailIncidentFilter
 }
+
+$incidentFilter = New-RetailIncidentFilterPayload
 Invoke-AgentApi -Method Put -Path "/api/v2/extendedAgent/incidentFilters/$incidentFilterName" -Body $incidentFilter | Out-Null
 
 $configuredFiltersResponse = Invoke-AgentApi -Method Get -Path '/api/v2/extendedAgent/incidentFilters' -Body $null

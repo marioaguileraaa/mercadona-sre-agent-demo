@@ -50,7 +50,7 @@ Si OAuth o los writes están incompletos, realiza exactamente **Azure SRE Agent 
 
 No hay un endpoint soportado/documentado para resincronizar CodeRepo. Si está `Ready` en un SHA stale, realiza **Azure SRE Agent portal > Builder > Knowledge base > Add repository > elimina la fila stale, confirma y vuelve a añadir el mismo repositorio**, espera `Ready` y repite configure/verify. Los scripts no borran ni recrean silenciosamente un repositorio existente.
 
-Resultado esperado: `sre-agent-mercadona-v1` en Review/Low; LAW, App Insights, conector GitHub healthy y CodeRepo `Ready` en `$expectedCommit`; herramientas GitHub issue-create/update/branch/contents/PR-create; `incident-handler`; response plan `mercadona-cart-5xx-sev3` por alertId/título/recurso; quickstart competidor ausente; puente MSI seguro.
+Resultado esperado: `sre-agent-mercadona-v1` en Review/Low; LAW, App Insights, conector GitHub healthy y CodeRepo `Ready` en `$expectedCommit`; herramientas GitHub issue-create/update/branch/contents/PR-create; `incident-handler`; response plan `mercadona-cart-5xx-sev3` acotado por título exacto de la regla de alerta y Sev3; quickstart competidor ausente; puente MSI seguro.
 
 ## 4. Línea base e incidente
 

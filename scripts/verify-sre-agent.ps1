@@ -220,17 +220,20 @@ $planProperties = Get-OptionalValue -InputObject $responsePlan -Name 'properties
 if ($null -eq $planProperties) {
     $planProperties = $responsePlan
 }
-$azMonitorSettings = Get-OptionalValue -InputObject $planProperties -Name 'azMonitorFilterSettings'
+# The plan is scoped by incident title only. Azure Monitor incident titles embed the alert
+# rule name, so titleContains set to the exact deployed rule name binds this plan to that
+# single rule. alertId and azMonitorFilterSettings are deliberately not sent - the API
+# rejects that shape with HTTP 400 and defaults both to empty - so they are not asserted.
+# deepInvestigationEnabled and tags are sent but not echoed back by the data plane, so
+# asserting them here would fail closed on a correctly configured plan.
 if ((Get-OptionalValue -InputObject $planProperties -Name 'incidentPlatform') -ne 'AzMonitor' -or
     (Get-OptionalValue -InputObject $planProperties -Name 'isEnabled') -ne $true -or
     (Get-OptionalValue -InputObject $planProperties -Name 'agentMode') -ne 'Review' -or
     (Get-OptionalValue -InputObject $planProperties -Name 'handlingAgent') -ne 'incident-handler' -or
-    (Get-OptionalValue -InputObject $planProperties -Name 'alertId') -ne $alertResourceId -or
     (Get-OptionalValue -InputObject $planProperties -Name 'titleContains') -ne $alertName -or
-    @(Get-OptionalValue -InputObject $planProperties -Name 'priorities') -notcontains 'Sev3' -or
-    (Get-OptionalValue -InputObject $azMonitorSettings -Name 'targetResourceType') -ne 'Microsoft.App/containerApps' -or
-    (Get-OptionalValue -InputObject $azMonitorSettings -Name 'targetResource') -ne $backendResourceId) {
-    throw 'The retail response plan is not exactly scoped by alertId, title, Sev3, resource type and backend resource.'
+    (Get-OptionalValue -InputObject $planProperties -Name 'maxAutomatedInvestigationAttempts') -ne 3 -or
+    @(Get-OptionalValue -InputObject $planProperties -Name 'priorities') -notcontains 'Sev3') {
+    throw 'The retail response plan is not exactly scoped by the deployed alert rule title, Sev3 and the Review incident-handler.'
 }
 
 $plansResponse = Invoke-SreAgentRead -Endpoint $endpoint -Path '/api/v2/extendedAgent/incidentFilters'

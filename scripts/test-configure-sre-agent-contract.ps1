@@ -23,6 +23,8 @@ $requiredFunctions = @(
     'Get-ArmAccessTokenIdentity',
     'Get-OptionalPropertyValue',
     'Get-FirstOptionalPropertyValue',
+    'Format-AgentApiFailure',
+    'New-RetailIncidentFilterPayload',
     'Disable-IncidentFilter',
     'Sync-RetailIncidentFilters'
 )
@@ -333,8 +335,10 @@ foreach ($requiredContract in @(
         'create_pull_request',
         'QueryAppInsightsByResourceId',
         'titleContains',
-        'azMonitorFilterSettings',
-        'targetResource',
+        'deepInvestigationEnabled',
+        'maxAutomatedInvestigationAttempts',
+        'New-RetailIncidentFilterPayload',
+        'Format-AgentApiFailure',
         'DEMO_CART_MEMORY_MB_PER_ADD',
         'DEMO_CART_MEMORY_FAILURE_MB',
         'Requests 5xx',
@@ -358,7 +362,7 @@ if ($source.Contains('Authorization = "******"', [StringComparison]::Ordinal)) {
 }
 if ($source -notmatch "priorities\s*=\s*@\('Sev3'\)" -or
     $source -notmatch "agentMode\s*=\s*'Review'" -or
-    $source -notmatch 'mergeEnabled\s*=\s*\$false') {
+    $source -notmatch 'deepInvestigationEnabled\s*=\s*\$true') {
     throw 'Sev3 Review response-plan guardrails were not found.'
 }
 if (-not $source.Contains(
@@ -615,5 +619,498 @@ Assert-Equal `
     -Actual $script:fakeIncidentFilters.ContainsKey('quickstart_response_plan') `
     -Expected $true `
     -Case 'Missing legacy filter preserves disposable plan until reconciliation can proceed'
+
+foreach ($constantName in @('cartAlertName', 'incidentFilterName', 'incidentHandlerName')) {
+    $constantAssignments = @($scriptAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Left.VariablePath.UserPath -eq $constantName
+    }, $true))
+    Assert-Equal `
+        -Actual $constantAssignments.Count `
+        -Expected 1 `
+        -Case "Constant `$$constantName is assigned exactly once and cannot drift"
+    if ($constantAssignments[0].Right.Extent.Text -notmatch "^'[^']+'$") {
+        throw "Constant '`$$constantName' must be a single-quoted literal in configure-sre-agent.ps1."
+    }
+    . ([scriptblock]::Create($constantAssignments[0].Extent.Text))
+}
+
+$incidentFilterReferences = @($scriptAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.VariablePath.UserPath -eq 'incidentFilter'
+}, $true))
+Assert-Equal `
+    -Actual $incidentFilterReferences.Count `
+    -Expected 2 `
+    -Case 'The retail IncidentFilter payload is only assigned and then sent, never mutated'
+$incidentFilterAssignments = @($scriptAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -eq 'incidentFilter'
+}, $true))
+Assert-Equal `
+    -Actual $incidentFilterAssignments.Count `
+    -Expected 1 `
+    -Case 'The retail IncidentFilter payload has a single assignment'
+Assert-Equal `
+    -Actual $incidentFilterAssignments[0].Right.Extent.Text `
+    -Expected 'New-RetailIncidentFilterPayload' `
+    -Case 'The retail IncidentFilter payload comes from the guarded builder'
+$incidentFilterPutCalls = @($commandAsts | Where-Object {
+        $_.GetCommandName() -eq 'Invoke-AgentApi' -and
+        $_.Extent.Text -match '(?i)-Method\s+Put' -and
+        $_.Extent.Text -match 'incidentFilters/\$incidentFilterName'
+    })
+Assert-Equal `
+    -Actual $incidentFilterPutCalls.Count `
+    -Expected 1 `
+    -Case 'The retail IncidentFilter is written exactly once'
+if ($incidentFilterPutCalls[0].Extent.Text -notmatch '-Body\s+\$incidentFilter(?![A-Za-z0-9_])') {
+    throw 'The retail IncidentFilter PUT does not send the guarded builder payload.'
+}
+
+$bicepSource = Get-Content -LiteralPath (
+    Join-Path (Split-Path $PSScriptRoot -Parent) 'infra\main.bicep'
+) -Raw
+$bicepAlertMatch = [regex]::Match(
+    $bicepSource,
+    "(?m)^resource\s+\w+\s+'Microsoft\.Insights/metricAlerts@[^']+'\s*=\s*\{\s*\r?\n\s*name:\s*'(?<name>[^']+)'"
+)
+if (-not $bicepAlertMatch.Success) {
+    throw 'infra/main.bicep does not declare a Microsoft.Insights/metricAlerts resource with a literal name.'
+}
+Assert-Equal `
+    -Actual $cartAlertName `
+    -Expected $bicepAlertMatch.Groups['name'].Value `
+    -Case 'Retail alert constant matches the deployed Bicep alert rule name'
+
+$verifySource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'verify-sre-agent.ps1') -Raw
+$verifyAlertMatch = [regex]::Match($verifySource, "(?m)^\`$alertName\s*=\s*'(?<name>[^']+)'")
+if (-not $verifyAlertMatch.Success) {
+    throw 'verify-sre-agent.ps1 does not declare a literal $alertName constant.'
+}
+Assert-Equal `
+    -Actual $verifyAlertMatch.Groups['name'].Value `
+    -Expected $cartAlertName `
+    -Case 'Verifier alert constant cannot drift from the configurator'
+
+$retailFilterPayload = New-RetailIncidentFilterPayload
+Assert-Equal `
+    -Actual ((@($retailFilterPayload.Keys) | Sort-Object) -join ',') `
+    -Expected 'name,properties,tags,type' `
+    -Case 'Retail IncidentFilter root uses the proven field set'
+Assert-Equal `
+    -Actual ((@($retailFilterPayload.properties.Keys) | Sort-Object) -join ',') `
+    -Expected (
+        'agentMode,deepInvestigationEnabled,handlingAgent,incidentPlatform,' +
+        'isEnabled,maxAutomatedInvestigationAttempts,priorities,titleContains'
+    ) `
+    -Case 'Retail IncidentFilter properties use the proven field set'
+Assert-Equal -Actual $retailFilterPayload.name -Expected $incidentFilterName -Case 'Retail IncidentFilter name'
+Assert-Equal -Actual $retailFilterPayload.type -Expected 'IncidentFilter' -Case 'Retail IncidentFilter type'
+Assert-Equal `
+    -Actual (@($retailFilterPayload.tags) -join ',') `
+    -Expected 'mercadona-demo' `
+    -Case 'Retail IncidentFilter tags'
+Assert-Equal `
+    -Actual $retailFilterPayload.properties.titleContains `
+    -Expected $cartAlertName `
+    -Case 'Retail IncidentFilter title scope is the exact deployed alert rule name'
+Assert-Equal `
+    -Actual $retailFilterPayload.properties.handlingAgent `
+    -Expected $incidentHandlerName `
+    -Case 'Retail IncidentFilter handling agent'
+Assert-Equal -Actual $retailFilterPayload.properties.agentMode -Expected 'Review' -Case 'Retail IncidentFilter Review mode'
+Assert-Equal -Actual $retailFilterPayload.properties.incidentPlatform -Expected 'AzMonitor' -Case 'Retail IncidentFilter platform'
+Assert-Equal -Actual $retailFilterPayload.properties.isEnabled -Expected $true -Case 'Retail IncidentFilter enabled'
+Assert-Equal -Actual $retailFilterPayload.properties.deepInvestigationEnabled -Expected $true -Case 'Retail IncidentFilter deep investigation'
+Assert-Equal `
+    -Actual $retailFilterPayload.properties.maxAutomatedInvestigationAttempts `
+    -Expected 3 `
+    -Case 'Retail IncidentFilter bounded investigation attempts'
+Assert-Equal `
+    -Actual (@($retailFilterPayload.properties.priorities) -join ',') `
+    -Expected 'Sev3' `
+    -Case 'Retail IncidentFilter Sev3 priority'
+
+$rejectedFilterProperties = @('alertId', 'azMonitorFilterSettings', 'mergeEnabled')
+$retailFilterJson = $retailFilterPayload | ConvertTo-Json -Depth 30
+$retailFilterFromJson = $retailFilterJson | ConvertFrom-Json
+foreach ($rejectedProperty in $rejectedFilterProperties) {
+    if ($null -ne $retailFilterFromJson.properties.PSObject.Properties[$rejectedProperty]) {
+        throw "The serialized retail IncidentFilter must not contain '$rejectedProperty'."
+    }
+    if ($retailFilterJson -match "(?i)`"$([regex]::Escape($rejectedProperty))`"\s*:") {
+        throw "The serialized retail IncidentFilter must not send '$rejectedProperty'."
+    }
+}
+Assert-Equal `
+    -Actual $retailFilterFromJson.properties.titleContains `
+    -Expected $cartAlertName `
+    -Case 'Serialized retail IncidentFilter keeps the exact alert-rule title scope'
+
+$payloadFunctionAst = $scriptAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'New-RetailIncidentFilterPayload'
+}, $true)
+$payloadAnchor = '        titleContains = $cartAlertName'
+if (-not $payloadFunctionAst.Extent.Text.Contains($payloadAnchor, [StringComparison]::Ordinal)) {
+    throw 'The retail IncidentFilter payload no longer exposes the expected titleContains anchor.'
+}
+$rejectedFilterInjections = @(
+    @{ Name = 'alertId'; Statement = "        alertId = '/subscriptions/synthetic/metricAlerts/synthetic'" },
+    @{ Name = 'azMonitorFilterSettings'; Statement = "        azMonitorFilterSettings = @{ targetResource = 'synthetic' }" },
+    @{ Name = 'mergeEnabled'; Statement = '        mergeEnabled = $false' }
+)
+foreach ($rejectedInjection in $rejectedFilterInjections) {
+    $mutatedPayloadSource = $payloadFunctionAst.Extent.Text.
+        Replace(
+            'function New-RetailIncidentFilterPayload {',
+            'function New-MutatedRetailIncidentFilterPayload {'
+        ).
+        Replace(
+            $payloadAnchor,
+            ($payloadAnchor + [Environment]::NewLine + $rejectedInjection.Statement)
+        )
+    . ([scriptblock]::Create($mutatedPayloadSource))
+    Assert-Throws `
+        -Action { New-MutatedRetailIncidentFilterPayload } `
+        -ExpectedMessage (
+            "The retail IncidentFilter payload must not send '$($rejectedInjection.Name)'; " +
+            'the Azure SRE Agent API rejects that shape with HTTP 400.'
+        ) `
+        -Case "Reintroducing $($rejectedInjection.Name) fails the retail IncidentFilter payload"
+}
+
+$driftedPayloadSource = $payloadFunctionAst.Extent.Text.
+    Replace(
+        'function New-RetailIncidentFilterPayload {',
+        'function New-DriftedRetailIncidentFilterPayload {'
+    ).
+    Replace($payloadAnchor, "        titleContains = 'mercadona'")
+. ([scriptblock]::Create($driftedPayloadSource))
+Assert-Throws `
+    -Action { New-DriftedRetailIncidentFilterPayload } `
+    -ExpectedMessage 'The retail IncidentFilter must stay scoped to the exact deployed retail alert rule name.' `
+    -Case 'Broadening the retail IncidentFilter title scope is rejected'
+
+if ($null -eq ('MercadonaAgentApiContractHttpMessageHandler' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class MercadonaAgentApiContractHttpMessageHandler : HttpMessageHandler
+{
+    private readonly HttpStatusCode statusCode;
+    private readonly string reasonPhrase;
+    private readonly string responseBody;
+
+    public int RequestCount { get; private set; }
+    public string LastAuthorization { get; private set; }
+    public string LastRequestBody { get; private set; }
+
+    public MercadonaAgentApiContractHttpMessageHandler(
+        int statusCode,
+        string reasonPhrase,
+        string responseBody)
+    {
+        this.statusCode = (HttpStatusCode)statusCode;
+        this.reasonPhrase = reasonPhrase;
+        this.responseBody = responseBody;
+    }
+
+    private HttpResponseMessage CreateResponse(HttpRequestMessage request)
+    {
+        RequestCount++;
+        LastAuthorization = request.Headers.Contains("Authorization")
+            ? string.Join(",", request.Headers.GetValues("Authorization"))
+            : null;
+        LastRequestBody = request.Content == null
+            ? null
+            : request.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        var response = new HttpResponseMessage(statusCode)
+        {
+            ReasonPhrase = reasonPhrase
+        };
+        if (responseBody != null)
+        {
+            response.Content = new StringContent(responseBody, Encoding.UTF8, "application/json");
+        }
+        return response;
+    }
+
+    protected override HttpResponseMessage Send(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        return CreateResponse(request);
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        return Task.FromResult(CreateResponse(request));
+    }
+}
+'@
+}
+
+$agentApiFunctionAst = $scriptAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Invoke-AgentApi'
+}, $true)
+if ($null -eq $agentApiFunctionAst) {
+    throw "Required function 'Invoke-AgentApi' was not found."
+}
+if ($agentApiFunctionAst.Extent.Text -match '\.EnsureSuccessStatusCode\(') {
+    throw 'Invoke-AgentApi still discards the failure response body through EnsureSuccessStatusCode.'
+}
+. ([scriptblock]::Create($agentApiFunctionAst.Extent.Text.Replace(
+    'function Invoke-AgentApi {',
+    'function Invoke-AgentApiUnderTest {'
+)))
+
+$endpoint = 'https://sre-agent.invalid'
+
+function Invoke-AgentApiResponseProbe {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Delete', 'Get', 'Post', 'Put')]
+        [string] $Method,
+        [Parameter(Mandatory)]
+        [string] $Path,
+        [Parameter(Mandatory)]
+        [int] $StatusCode,
+        [Parameter(Mandatory)]
+        [string] $ReasonPhrase,
+        [AllowNull()]
+        [string] $ResponseBody
+    )
+
+    $credentialMarker = 'CREDENTIAL_MUST_NOT_BE_ECHOED'
+    $requestBodyMarker = 'REQUEST_BODY_MUST_NOT_BE_ECHOED'
+    $handlerType = 'MercadonaAgentApiContractHttpMessageHandler' -as [type]
+    $handler = [Activator]::CreateInstance(
+        $handlerType,
+        @($StatusCode, $ReasonPhrase, $ResponseBody)
+    )
+    $script:agentHttpClient = [System.Net.Http.HttpClient]::new($handler, $true)
+    $script:dataPlaneHeaders = @{
+        Authorization = "Bearer $credentialMarker"
+        'Content-Type' = 'application/json'
+    }
+
+    $result = $null
+    $errorMessage = $null
+    try {
+        $result = Invoke-AgentApiUnderTest `
+            -Method $Method `
+            -Path $Path `
+            -Body @{ marker = $requestBodyMarker }
+    } catch {
+        $errorMessage = $_.Exception.Message
+    } finally {
+        $script:agentHttpClient.Dispose()
+        $script:agentHttpClient = $null
+        $script:dataPlaneHeaders = $null
+    }
+
+    return [pscustomobject]@{
+        Result = $result
+        ErrorMessage = $errorMessage
+        RequestCount = $handler.RequestCount
+        LastAuthorization = $handler.LastAuthorization
+        LastRequestBody = $handler.LastRequestBody
+        CredentialMarker = $credentialMarker
+        RequestBodyMarker = $requestBodyMarker
+    }
+}
+
+$validationResponseBody = '{"errors":{"properties.alertId":["The alertId field is not supported."],' +
+    '"properties.azMonitorFilterSettings":["The azMonitorFilterSettings field is not supported."]},' +
+    '"title":"One or more validation errors occurred.","status":400}'
+$badRequestProbe = Invoke-AgentApiResponseProbe `
+    -Method Put `
+    -Path '/api/v2/extendedAgent/incidentFilters/mercadona-cart-5xx-sev3' `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody $validationResponseBody
+Assert-Equal -Actual $badRequestProbe.RequestCount -Expected 1 -Case 'Bad Request probe sends exactly one request'
+Assert-Equal -Actual $badRequestProbe.Result -Expected $null -Case 'A non-2xx response is never treated as success'
+foreach ($expectedFragment in @(
+        'PUT',
+        '/api/v2/extendedAgent/incidentFilters/mercadona-cart-5xx-sev3',
+        'HTTP 400 (Bad Request)',
+        'The alertId field is not supported.',
+        'The azMonitorFilterSettings field is not supported.'
+    )) {
+    if (-not $badRequestProbe.ErrorMessage.Contains($expectedFragment, [StringComparison]::Ordinal)) {
+        throw "The HTTP 400 failure did not report '$expectedFragment'."
+    }
+}
+if ($badRequestProbe.ErrorMessage.Contains($badRequestProbe.CredentialMarker, [StringComparison]::Ordinal) -or
+    $badRequestProbe.ErrorMessage.Contains($badRequestProbe.RequestBodyMarker, [StringComparison]::Ordinal)) {
+    throw 'The HTTP 400 failure echoed the authorization header or the request body.'
+}
+if (-not $badRequestProbe.LastAuthorization.Contains($badRequestProbe.CredentialMarker, [StringComparison]::Ordinal) -or
+    -not $badRequestProbe.LastRequestBody.Contains($badRequestProbe.RequestBodyMarker, [StringComparison]::Ordinal)) {
+    throw 'The data-plane probe did not actually send the private authorization and request-body markers.'
+}
+
+$emptyBodyProbe = Invoke-AgentApiResponseProbe `
+    -Method Get `
+    -Path '/api/v2/repos' `
+    -StatusCode 500 `
+    -ReasonPhrase 'Internal Server Error' `
+    -ResponseBody ' '
+Assert-Equal `
+    -Actual $emptyBodyProbe.ErrorMessage `
+    -Expected (
+        'Azure SRE Agent data-plane request GET /api/v2/repos failed with ' +
+        'HTTP 500 (Internal Server Error). Response body was empty.'
+    ) `
+    -Case 'An empty failure body still reports method, path and status'
+
+$redirectProbe = Invoke-AgentApiResponseProbe `
+    -Method Post `
+    -Path '/api/v1/httptriggers/create' `
+    -StatusCode 302 `
+    -ReasonPhrase 'Found' `
+    -ResponseBody ''
+Assert-Equal -Actual $redirectProbe.Result -Expected $null -Case 'A redirect is never treated as success'
+if (-not $redirectProbe.ErrorMessage.Contains('HTTP 302 (Found)', [StringComparison]::Ordinal)) {
+    throw 'A non-2xx redirect did not fail closed with its status.'
+}
+
+$successProbe = Invoke-AgentApiResponseProbe `
+    -Method Get `
+    -Path '/api/v2/extendedAgent/incidentFilters/mercadona-cart-5xx-sev3' `
+    -StatusCode 200 `
+    -ReasonPhrase 'OK' `
+    -ResponseBody '{"name":"mercadona-cart-5xx-sev3","properties":{"titleContains":"alert-mercadona-cart-5xx-sev3"}}'
+Assert-Equal -Actual $successProbe.ErrorMessage -Expected $null -Case 'A 2xx response does not throw'
+Assert-Equal `
+    -Actual $successProbe.Result.properties.titleContains `
+    -Expected 'alert-mercadona-cart-5xx-sev3' `
+    -Case 'A 2xx response is still deserialized'
+
+$emptySuccessProbe = Invoke-AgentApiResponseProbe `
+    -Method Delete `
+    -Path '/api/v2/extendedAgent/incidentFilters/quickstart_response_plan' `
+    -StatusCode 204 `
+    -ReasonPhrase 'No Content' `
+    -ResponseBody ''
+Assert-Equal -Actual $emptySuccessProbe.ErrorMessage -Expected $null -Case 'An empty 2xx response does not throw'
+Assert-Equal -Actual $emptySuccessProbe.Result -Expected $null -Case 'An empty 2xx response returns null'
+
+$boundedFailure = Format-AgentApiFailure `
+    -Method 'Put' `
+    -Path '/api/v2/extendedAgent/incidentFilters/mercadona-cart-5xx-sev3' `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody ('x' * 5000) `
+    -MaxCharacters 128
+if (-not $boundedFailure.Contains(('x' * 128), [StringComparison]::Ordinal) -or
+    $boundedFailure.Contains(('x' * 129), [StringComparison]::Ordinal) -or
+    -not $boundedFailure.Contains('[truncated at 128 characters]', [StringComparison]::Ordinal)) {
+    throw 'The data-plane failure body was not bounded to the requested character budget.'
+}
+
+$defaultBoundedFailure = Format-AgentApiFailure `
+    -Method 'Put' `
+    -Path '/api/v2/extendedAgent/incidentFilters/mercadona-cart-5xx-sev3' `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody ('y' * 9000)
+if (-not $defaultBoundedFailure.Contains('[truncated at 2000 characters]', [StringComparison]::Ordinal) -or
+    $defaultBoundedFailure.Contains(('y' * 2001), [StringComparison]::Ordinal)) {
+    throw 'The default data-plane failure body budget is not 2000 characters.'
+}
+
+$redactedFailure = Format-AgentApiFailure `
+    -Method 'Post' `
+    -Path '/api/v1/httptriggers/create' `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody '{"detail":"rejected","accessToken":"SYNTHETIC MUST BE REDACTED","clientSecret":"SYNTHETIC,MUST&BE;REDACTED","sig":"SYNTHETIC MUST BE REDACTED"}'
+if ($redactedFailure.Contains('SYNTHETIC', [StringComparison]::Ordinal) -or
+    $redactedFailure.Contains('MUST', [StringComparison]::Ordinal) -or
+    $redactedFailure.Contains('REDACTED', [StringComparison]::Ordinal)) {
+    throw 'The data-plane failure body leaked part of a quoted credential value.'
+}
+foreach ($redactedField in @('accessToken', 'clientSecret', 'sig')) {
+    if (-not $redactedFailure.Contains("$redactedField`":`"[redacted]`"", [StringComparison]::Ordinal)) {
+        throw "The data-plane failure body did not redact the whole quoted '$redactedField' value."
+    }
+}
+if (-not $redactedFailure.Contains('rejected', [StringComparison]::Ordinal)) {
+    throw 'Redaction removed the diagnostic detail that makes the failure actionable.'
+}
+
+$unquotedRedactedFailure = Format-AgentApiFailure `
+    -Method 'Post' `
+    -Path '/api/v1/httptriggers/create' `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody 'refreshToken=SYNTHETICVALUE&api_key=SYNTHETICVALUE'
+if ($unquotedRedactedFailure.Contains('SYNTHETICVALUE', [StringComparison]::Ordinal)) {
+    throw 'The data-plane failure body did not redact delimiter-bounded credential values.'
+}
+
+$truncatedCredentialFailure = Format-AgentApiFailure `
+    -Method 'Post' `
+    -Path '/api/v1/httptriggers/create' `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody '{"clientSecret":"SYNTHETICVALUE","detail":"rejected"}' `
+    -MaxCharacters 25
+if ($truncatedCredentialFailure.Contains('SYNTHETIC', [StringComparison]::Ordinal)) {
+    throw 'A credential cut short by truncation was not redacted.'
+}
+
+$surrogateFailure = Format-AgentApiFailure `
+    -Method 'Put' `
+    -Path '/api/v2/extendedAgent/incidentFilters/mercadona-cart-5xx-sev3' `
+    -StatusCode 400 `
+    -ReasonPhrase 'Bad Request' `
+    -ResponseBody (('a' * 127) + [char]::ConvertFromUtf32(0x1F600) + ('b' * 200)) `
+    -MaxCharacters 128
+if (@($surrogateFailure.ToCharArray() | Where-Object { [char]::IsSurrogate($_) }).Count -ne 0) {
+    throw 'Bounding the data-plane failure body split a surrogate pair.'
+}
+try {
+    $null = [System.Text.UTF8Encoding]::new($false, $true).GetBytes($surrogateFailure)
+} catch {
+    throw 'The bounded data-plane failure body is not valid UTF-16 and cannot be encoded.'
+}
+if (-not $surrogateFailure.Contains('[truncated at 128 characters]', [StringComparison]::Ordinal)) {
+    throw 'The surrogate-safe bound did not report truncation.'
+}
+
+$unreadableFailure = Format-AgentApiFailure `
+    -Method 'Get' `
+    -Path '/api/v2/agent/tools' `
+    -StatusCode 502 `
+    -ReasonPhrase 'Bad Gateway' `
+    -ResponseBody $null `
+    -ResponseBodyReadFailed
+Assert-Equal `
+    -Actual $unreadableFailure `
+    -Expected (
+        'Azure SRE Agent data-plane request GET /api/v2/agent/tools failed with ' +
+        'HTTP 502 (Bad Gateway). Response body could not be read.'
+    ) `
+    -Case 'An unreadable failure body still fails closed with method, path and status'
 
 Write-Host 'configure-sre-agent strict-mode response contract passed.'
