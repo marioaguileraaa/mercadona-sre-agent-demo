@@ -18,7 +18,7 @@ $expectedCommit = (git rev-parse origin/main).Trim()
 .\scripts\verify-sre-agent.ps1 -ExpectedRepositoryCommit $expectedCommit
 ```
 
-Di: “El agente está en Review/Low. El response plan solo coincide con la alerta Sev3 5xx y el backend exactos. CodeRepo está Ready en el SHA completo de origin/main y GitHub expone issue create/update, branch, contents/push y pull-request create; merge, workflows y deploy están denegados.”
+Di: “El agente está en Review/Low. El response plan solo coincide con incidentes Sev3 cuyo título contiene el nombre exacto de la regla desplegada `alert-mercadona-cart-5xx-sev3`. CodeRepo está Ready en el SHA completo de origin/main y GitHub expone issue create/update, branch, contents/push y pull-request create; merge, workflows y deploy están denegados.”
 
 Si aparece `INCOMPLETE`, detén la demo. Para permisos, usa **Builder > Connectors > GitHub OAuth > reconnect/authorize permissions for issues, contents and pull requests**. Para un SHA stale, usa **Builder > Knowledge base > Add repository**, reemplaza manualmente la fila stale y espera `Ready`. Después repite configure/verify con el mismo SHA; nunca copies tokens.
 

@@ -113,12 +113,23 @@ foreach ($required in @(
         'push_files',
         'create_pull_request',
         'quickstart_response_plan',
-        'alertId',
-        'targetResource',
+        'titleContains',
+        'alert-mercadona-cart-5xx-sev3',
         'incident-handler'
     )) {
     if (-not ($verify + $configure + $githubPreflight).Contains($required, [StringComparison]::OrdinalIgnoreCase)) {
         throw "SRE verification/configuration contract is missing '$required'."
+    }
+}
+# The retail response plan is scoped by incident title only. alertId and
+# azMonitorFilterSettings are rejected by the API with HTTP 400, so neither the
+# configurator nor the verifier may reintroduce them as live payload fields.
+foreach ($rejectedFilterField in @('alertId', 'azMonitorFilterSettings', 'mergeEnabled')) {
+    if ($configure -match "(?m)^\s+$([regex]::Escape($rejectedFilterField))\s*=") {
+        throw "The retail IncidentFilter payload must not send '$rejectedFilterField'."
+    }
+    if ($verify -match "(?i)-Name\s+'$([regex]::Escape($rejectedFilterField))'") {
+        throw "The retail verifier must not assert the unsupported '$rejectedFilterField' field."
     }
 }
 foreach ($forbidden in @('merge_pull_request', 'run_workflow', 'workflow_dispatch')) {

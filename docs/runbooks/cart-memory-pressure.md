@@ -98,7 +98,7 @@ Evidence should converge on the same revision and correlation IDs, 10,485,760-by
 
 ## SRE Agent approval and GitHub boundary
 
-`incident-handler` and `mercadona-cart-5xx-sev3` stay in Review. The response plan is constrained by exact alert ID, title, Sev3 and backend resource. Known quickstart plans are removed; Arc filters are not modified.
+`incident-handler` and `mercadona-cart-5xx-sev3` stay in Review. The response plan is constrained to Sev3 incidents whose title contains the exact deployed alert rule name `alert-mercadona-cart-5xx-sev3`; Azure Monitor incident titles embed the rule name, so that single condition binds the plan to that one rule. `alertId` and `azMonitorFilterSettings` are not sent because the data-plane API rejects that shape with HTTP 400. Known quickstart plans are removed; Arc filters are not modified.
 
 The only immediate mitigation is:
 
