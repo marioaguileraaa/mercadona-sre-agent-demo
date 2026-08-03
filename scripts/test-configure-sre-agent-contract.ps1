@@ -335,7 +335,6 @@ foreach ($requiredContract in @(
         'create_pull_request',
         'QueryAppInsightsByResourceId',
         'titleContains',
-        'deepInvestigationEnabled',
         'maxAutomatedInvestigationAttempts',
         'New-RetailIncidentFilterPayload',
         'Format-AgentApiFailure',
@@ -362,7 +361,7 @@ if ($source.Contains('Authorization = "******"', [StringComparison]::Ordinal)) {
 }
 if ($source -notmatch "priorities\s*=\s*@\('Sev3'\)" -or
     $source -notmatch "agentMode\s*=\s*'Review'" -or
-    $source -notmatch 'deepInvestigationEnabled\s*=\s*\$true') {
+    $source -notmatch 'maxAutomatedInvestigationAttempts\s*=\s*3') {
     throw 'Sev3 Review response-plan guardrails were not found.'
 }
 if (-not $source.Contains(
@@ -706,7 +705,7 @@ Assert-Equal `
 Assert-Equal `
     -Actual ((@($retailFilterPayload.properties.Keys) | Sort-Object) -join ',') `
     -Expected (
-        'agentMode,deepInvestigationEnabled,handlingAgent,incidentPlatform,' +
+        'agentMode,handlingAgent,incidentPlatform,' +
         'isEnabled,maxAutomatedInvestigationAttempts,priorities,titleContains'
     ) `
     -Case 'Retail IncidentFilter properties use the proven field set'
@@ -727,7 +726,6 @@ Assert-Equal `
 Assert-Equal -Actual $retailFilterPayload.properties.agentMode -Expected 'Review' -Case 'Retail IncidentFilter Review mode'
 Assert-Equal -Actual $retailFilterPayload.properties.incidentPlatform -Expected 'AzMonitor' -Case 'Retail IncidentFilter platform'
 Assert-Equal -Actual $retailFilterPayload.properties.isEnabled -Expected $true -Case 'Retail IncidentFilter enabled'
-Assert-Equal -Actual $retailFilterPayload.properties.deepInvestigationEnabled -Expected $true -Case 'Retail IncidentFilter deep investigation'
 Assert-Equal `
     -Actual $retailFilterPayload.properties.maxAutomatedInvestigationAttempts `
     -Expected 3 `
@@ -737,7 +735,7 @@ Assert-Equal `
     -Expected 'Sev3' `
     -Case 'Retail IncidentFilter Sev3 priority'
 
-$rejectedFilterProperties = @('alertId', 'azMonitorFilterSettings', 'mergeEnabled')
+$rejectedFilterProperties = @('alertId', 'azMonitorFilterSettings', 'mergeEnabled', 'deepInvestigationEnabled')
 $retailFilterJson = $retailFilterPayload | ConvertTo-Json -Depth 30
 $retailFilterFromJson = $retailFilterJson | ConvertFrom-Json
 foreach ($rejectedProperty in $rejectedFilterProperties) {
@@ -765,7 +763,8 @@ if (-not $payloadFunctionAst.Extent.Text.Contains($payloadAnchor, [StringCompari
 $rejectedFilterInjections = @(
     @{ Name = 'alertId'; Statement = "        alertId = '/subscriptions/synthetic/metricAlerts/synthetic'" },
     @{ Name = 'azMonitorFilterSettings'; Statement = "        azMonitorFilterSettings = @{ targetResource = 'synthetic' }" },
-    @{ Name = 'mergeEnabled'; Statement = '        mergeEnabled = $false' }
+    @{ Name = 'mergeEnabled'; Statement = '        mergeEnabled = $false' },
+    @{ Name = 'deepInvestigationEnabled'; Statement = '        deepInvestigationEnabled = $true' }
 )
 foreach ($rejectedInjection in $rejectedFilterInjections) {
     $mutatedPayloadSource = $payloadFunctionAst.Extent.Text.

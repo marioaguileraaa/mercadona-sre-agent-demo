@@ -222,10 +222,10 @@ if ($null -eq $planProperties) {
 }
 # The plan is scoped by incident title only. Azure Monitor incident titles embed the alert
 # rule name, so titleContains set to the exact deployed rule name binds this plan to that
-# single rule. alertId and azMonitorFilterSettings are deliberately not sent - the API
-# rejects that shape with HTTP 400 and defaults both to empty - so they are not asserted.
-# deepInvestigationEnabled and tags are sent but not echoed back by the data plane, so
-# asserting them here would fail closed on a correctly configured plan.
+# single rule. alertId, azMonitorFilterSettings and deepInvestigationEnabled are deliberately
+# not sent - the API rejects those shapes with HTTP 400 - so they are not asserted. tags are
+# sent but not echoed back by the data plane, so asserting them here would fail closed on a
+# correctly configured plan.
 if ((Get-OptionalValue -InputObject $planProperties -Name 'incidentPlatform') -ne 'AzMonitor' -or
     (Get-OptionalValue -InputObject $planProperties -Name 'isEnabled') -ne $true -or
     (Get-OptionalValue -InputObject $planProperties -Name 'agentMode') -ne 'Review' -or

@@ -121,10 +121,11 @@ foreach ($required in @(
         throw "SRE verification/configuration contract is missing '$required'."
     }
 }
-# The retail response plan is scoped by incident title only. alertId and
-# azMonitorFilterSettings are rejected by the API with HTTP 400, so neither the
-# configurator nor the verifier may reintroduce them as live payload fields.
-foreach ($rejectedFilterField in @('alertId', 'azMonitorFilterSettings', 'mergeEnabled')) {
+# The retail response plan is scoped by incident title only. alertId,
+# azMonitorFilterSettings, mergeEnabled and deepInvestigationEnabled are rejected by the API
+# with HTTP 400, so neither the configurator nor the verifier may reintroduce them as live
+# payload fields.
+foreach ($rejectedFilterField in @('alertId', 'azMonitorFilterSettings', 'mergeEnabled', 'deepInvestigationEnabled')) {
     if ($configure -match "(?m)^\s+$([regex]::Escape($rejectedFilterField))\s*=") {
         throw "The retail IncidentFilter payload must not send '$rejectedFilterField'."
     }

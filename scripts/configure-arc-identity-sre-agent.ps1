@@ -445,7 +445,6 @@ $incidentFilter = @{
         titleContains = 'ArcBox IdentityOps'
         handlingAgent = 'identity-infrastructure-analyzer'
         agentMode = 'Review'
-        deepInvestigationEnabled = $true
         maxAutomatedInvestigationAttempts = 3
     }
 }

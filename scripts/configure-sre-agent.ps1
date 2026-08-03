@@ -804,10 +804,13 @@ function New-RetailIncidentFilterPayload {
     #     titleContains set to the full deployed rule name binds this plan to that single
     #     rule. It is strictly narrower than the legacy Sev2 cart filter, which matches on
     #     'mercadona'.
-    #   * alertId, azMonitorFilterSettings and mergeEnabled are intentionally omitted. The
-    #     API rejected that shape with HTTP 400, and the two filters it did accept carry an
-    #     empty alertId and an empty azMonitorFilterSettings. Do not "restore" them: it
-    #     reintroduces the 400 and buys no scoping that titleContains does not already give.
+    #   * alertId, azMonitorFilterSettings, mergeEnabled and deepInvestigationEnabled are
+    #     intentionally omitted. The API rejects those shapes with HTTP 400, and the two
+    #     filters it did accept carry an empty alertId and an empty azMonitorFilterSettings.
+    #     deepInvestigationEnabled was accepted silently until the API tightened model binding
+    #     and started returning 'could not be mapped to any .NET member contained in type
+    #     Agent.Web.Views.v2.IncidentFilterView'. Do not "restore" any of them: it reintroduces
+    #     the 400 and buys no scoping that titleContains does not already give.
     $retailIncidentFilter = @{
         name = $incidentFilterName
         type = 'IncidentFilter'
@@ -819,12 +822,11 @@ function New-RetailIncidentFilterPayload {
             titleContains = $cartAlertName
             handlingAgent = $incidentHandlerName
             agentMode = 'Review'
-            deepInvestigationEnabled = $true
             maxAutomatedInvestigationAttempts = 3
         }
     }
 
-    foreach ($rejectedProperty in @('alertId', 'azMonitorFilterSettings', 'mergeEnabled')) {
+    foreach ($rejectedProperty in @('alertId', 'azMonitorFilterSettings', 'mergeEnabled', 'deepInvestigationEnabled')) {
         if ($retailIncidentFilter.properties.ContainsKey($rejectedProperty)) {
             throw "The retail IncidentFilter payload must not send '$rejectedProperty'; the Azure SRE Agent API rejects that shape with HTTP 400."
         }
