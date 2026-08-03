@@ -90,9 +90,12 @@ Envolvente aplicada por el script y por el propio payload:
 - perfil por defecto `Split`: `ArcBox-Win2K22` memoria, `ArcBox-Win2K25` CPU;
 - memoria en trozos de 64 MiB, máximo duro 2048 MB, por defecto 1800 MB;
 - suelo de **700 MB disponibles** comprobado antes de cada asignación y en cada tick del bucle;
-- CPU con ciclo de trabajo, máximo 8 runspaces, proceso en prioridad `BelowNormal`;
+- CPU con ciclo de trabajo, máximo 8 procesos trabajadores efímeros creados con `Win32_Process`
+  (fuera del *job object* con CPU limitada en el que Arc Run Command aloja el payload), cada uno con
+  su propia fecha límite y en prioridad `BelowNormal`;
 - duración 300-900 s, por defecto 840 s, con fecha límite propia dentro del payload;
-- `finally` que libera memoria, cierra runspaces, restaura prioridad y emite el evento `5102`;
+- `finally` que libera memoria, detiene los procesos trabajadores, restaura prioridad y emite el
+  evento `5102`;
 - recursos Run Command con prefijo `perfops-`, sin persistencia de ningún tipo.
 
 El script se niega a arrancar si queda algún `perfops-*` sin limpiar. Anotar el `CorrelationId` que
@@ -133,8 +136,9 @@ Ambas reglas se autoresuelven a los 15 minutos sin muestras infractoras.
 
 ## Reversión
 
-- **Presión**: borrar todos los `perfops-*` con el script de recuperación. La memoria y los
-  runspaces se liberan solos al terminar el payload, incluso si el Run Command se cancela.
+- **Presión**: borrar todos los `perfops-*` con el script de recuperación. La memoria se libera y los
+  procesos trabajadores de CPU se detienen solos al terminar el payload; además cada trabajador lleva
+  su propia fecha límite, así que la ventana aprobada se respeta aunque el Run Command se cancele.
 - **Alertas**: deshabilitar o borrar las dos `scheduledQueryRules` en `rg-arcbox-itpro-weu-002`.
 - **Libro**: borrar `Microsoft.Insights/workbooks` con las etiquetas de propiedad del escenario.
 - **Agente**: borrar los cinco objetos `arc-fleet-*`. No tocar los objetos `identity-infrastructure-*`

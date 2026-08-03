@@ -174,6 +174,9 @@ foreach ($mode in @('Cpu', 'Memory', 'Both')) {
             'demoSynthetic = $true',
             "correlationId = `$correlationId",
             'BelowNormal',
+            'Invoke-CimMethod -ClassName Win32_Process -MethodName Create',
+            'Stop-Process -Id $workerProcessId',
+            'while (DateTime.UtcNow.Ticks < deadlineTicks)',
             'rootCauseClue'
         )) {
         Assert-True -Condition $payload.Contains($requiredFragment, [StringComparison]::Ordinal) `
@@ -221,6 +224,17 @@ foreach ($mode in @('Cpu', 'Memory', 'Both')) {
     $finallyIndex = $payload.IndexOf('} finally {', [StringComparison]::Ordinal)
     $clearIndex = $payload.IndexOf('$chunks.Clear()', [StringComparison]::Ordinal)
     Assert-True -Condition ($finallyIndex -gt 0 -and $clearIndex -gt $finallyIndex) -Because "The generated $mode payload must free its memory inside the finally block."
+
+    # CPU workers run outside the Run Command job object, so they must be stopped in the finally
+    # block and must also carry a deadline of their own in case the parent is killed abruptly.
+    $stopWorkerIndex = $payload.IndexOf('Stop-Process -Id $workerProcessId', [StringComparison]::Ordinal)
+    Assert-True -Condition ($stopWorkerIndex -gt $finallyIndex) -Because "The generated $mode payload must stop every CPU worker process inside the finally block."
+    Assert-True -Condition ($payload.Contains('AddSeconds(' + "' + `$WorkerSeconds + '" + ').Ticks', [StringComparison]::Ordinal)) `
+        -Because "The generated $mode payload must give every CPU worker its own hard deadline."
+    Assert-True -Condition ($payload.Contains('$remainingSeconds -gt 0', [StringComparison]::Ordinal)) `
+        -Because "The generated $mode payload must never start a CPU worker once the window has elapsed."
+    Assert-True -Condition (-not $payload.Contains('runspacefactory', [StringComparison]::OrdinalIgnoreCase)) `
+        -Because "The generated $mode payload must not use in-process runspaces, which the Run Command job object throttles."
 }
 
 # Refusals in the payload generator.

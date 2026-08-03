@@ -315,6 +315,49 @@ function Get-AvailableMemoryMb {
     return [int] [math]::Round($snapshot.FreePhysicalMemory / 1024.0, 0)
 }
 
+function New-CpuWorkerEncodedCommand {
+    # Builds the bounded worker payload that each CPU pressure process runs. The compute kernel is
+    # compiled because an interpreted loop cannot raise machine CPU on this hardware, and the whole
+    # worker is bounded by a deadline it computes for itself from the validated duration.
+    param(
+        [Parameter(Mandatory)]
+        [int] $WorkerSeconds,
+        [Parameter(Mandatory)]
+        [int] $BusyMilliseconds,
+        [Parameter(Mandatory)]
+        [int] $IdleMilliseconds
+    )
+
+    $kernelSource = @(
+        'using System;',
+        'using System.Diagnostics;',
+        'using System.Threading;',
+        'public static class FleetOpsCpuLoad {',
+        '    public static void Spin(long deadlineTicks, int busyMilliseconds, int idleMilliseconds) {',
+        '        Stopwatch stopwatch = new Stopwatch();',
+        '        double accumulator = 0.0;',
+        '        while (DateTime.UtcNow.Ticks < deadlineTicks) {',
+        '            stopwatch.Restart();',
+        '            while (stopwatch.ElapsedMilliseconds < busyMilliseconds && DateTime.UtcNow.Ticks < deadlineTicks) {',
+        '                for (int i = 1; i < 500000; i++) { accumulator += Math.Sqrt((double)i); }',
+        '            }',
+        '            if (idleMilliseconds > 0) { Thread.Sleep(idleMilliseconds); }',
+        '        }',
+        '    }',
+        '}'
+    ) -join [Environment]::NewLine
+    $kernelBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($kernelSource))
+
+    $workerScript = @(
+        '$ErrorActionPreference = ''Stop''',
+        '[System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal',
+        ('$kernel = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''' + $kernelBase64 + '''))'),
+        'Add-Type -TypeDefinition $kernel -Language CSharp',
+        ('[FleetOpsCpuLoad]::Spin([datetime]::UtcNow.AddSeconds(' + $WorkerSeconds + ').Ticks, ' + $BusyMilliseconds + ', ' + $IdleMilliseconds + ')')
+    ) -join [Environment]::NewLine
+    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($workerScript))
+}
+
 $startedAtUtc = [DateTimeOffset]::UtcNow
 $availableAtStartMb = Get-AvailableMemoryMb
 Write-EventLog -LogName $logName -Source $source -EventId $startEventId -EntryType Warning -Message (
@@ -342,8 +385,7 @@ $process = [System.Diagnostics.Process]::GetCurrentProcess()
 $originalPriority = $process.PriorityClass
 $chunks = New-Object 'System.Collections.Generic.List[byte[]]'
 $chunkBytes = $chunkMb * 1MB
-$workers = New-Object 'System.Collections.Generic.List[object]'
-$runspacePool = $null
+$workers = New-Object 'System.Collections.Generic.List[int]'
 $deadline = (Get-Date).AddSeconds($durationSeconds)
 $peakAllocatedMb = 0
 $minimumObservedAvailableMb = $availableAtStartMb
@@ -375,30 +417,24 @@ try {
     }
 
     if (($mode -eq 'Cpu' -or $mode -eq 'Both') -and (Get-Date) -lt $deadline) {
-        $workerScript = {
-            param([long] $DeadlineTicks, [int] $BusyMilliseconds, [int] $IdleMilliseconds)
-            $workerDeadline = [datetime]::new($DeadlineTicks, [System.DateTimeKind]::Local)
-            $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $accumulator = 0.0
-            while ([datetime]::Now -lt $workerDeadline) {
-                $stopwatch.Restart()
-                while ($stopwatch.ElapsedMilliseconds -lt $BusyMilliseconds) {
-                    $accumulator += [math]::Sqrt([double] $stopwatch.ElapsedTicks)
-                }
-                if ($IdleMilliseconds -gt 0) { Start-Sleep -Milliseconds $IdleMilliseconds }
+        # Azure Arc Run Command hosts this script inside a Windows job object whose CPU rate is
+        # capped, so worker threads created inside this process can never raise machine CPU. The
+        # workers therefore run as separate short lived processes created through Win32_Process,
+        # which are outside that job object. Each worker computes its own hard deadline from the
+        # remaining approved window and runs at BelowNormal priority, so it stays preemptible and
+        # cannot outlive the window even if this parent script is terminated abruptly. No task,
+        # no persistence and no machine reconfiguration of any kind is created.
+        $remainingSeconds = [int] [math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+        if ($remainingSeconds -gt 0) {
+            $encodedWorker = New-CpuWorkerEncodedCommand `
+                -WorkerSeconds $remainingSeconds `
+                -BusyMilliseconds $busyMilliseconds `
+                -IdleMilliseconds $idleMilliseconds
+            $childCommandLine = 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + $encodedWorker
+            for ($workerIndex = 0; $workerIndex -lt $workerCount; $workerIndex++) {
+                $spawn = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $childCommandLine }
+                if ($spawn.ReturnValue -eq 0) { $workers.Add([int] $spawn.ProcessId) }
             }
-            return $accumulator
-        }
-        $runspacePool = [runspacefactory]::CreateRunspacePool(1, $workerCount)
-        $runspacePool.Open()
-        for ($workerIndex = 0; $workerIndex -lt $workerCount; $workerIndex++) {
-            $shell = [powershell]::Create()
-            $shell.RunspacePool = $runspacePool
-            $null = $shell.AddScript($workerScript).
-                AddArgument($deadline.Ticks).
-                AddArgument($busyMilliseconds).
-                AddArgument($idleMilliseconds)
-            $workers.Add([pscustomobject]@{ Shell = $shell; Handle = $shell.BeginInvoke() })
         }
     }
 
@@ -421,13 +457,8 @@ try {
         Start-Sleep -Seconds 5
     }
 } finally {
-    foreach ($worker in $workers) {
-        try { $null = $worker.Shell.EndInvoke($worker.Handle) } catch { }
-        try { $worker.Shell.Dispose() } catch { }
-    }
-    if ($null -ne $runspacePool) {
-        try { $runspacePool.Close() } catch { }
-        try { $runspacePool.Dispose() } catch { }
+    foreach ($workerProcessId in $workers) {
+        try { Stop-Process -Id $workerProcessId -Force -ErrorAction SilentlyContinue } catch { }
     }
     $chunks.Clear()
     [GC]::Collect()
@@ -451,6 +482,7 @@ try {
             minimumObservedAvailableMb = $minimumObservedAvailableMb
             availableMemoryMb = $availableAtEndMb
             cpuWorkerCount = $workerCount
+            cpuWorkerProcessIds = ($workers -join ',')
             elapsedSeconds = [int] ($completedAtUtc - $startedAtUtc).TotalSeconds
             emittedAtUtc = $completedAtUtc.ToString('o')
             rootCauseClue = 'Fictional runaway identity worker process was stopped by its own deadline.'
@@ -468,6 +500,7 @@ try {
     minimumObservedAvailableMb = $minimumObservedAvailableMb
     releasedChunks = $releasedChunks
     cpuWorkerCount = $workerCount
+    cpuWorkerProcessIds = ($workers -join ',')
     cpuDutyCyclePercent = $cpuDutyCyclePercent
     durationSeconds = $durationSeconds
 } | ConvertTo-Json -Compress

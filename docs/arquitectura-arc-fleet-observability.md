@@ -158,12 +158,17 @@ Se usa Arc Run Command con ejecución asíncrona. Envolvente de seguridad:
 - Memoria en trozos de 64 MiB, tocados y anclados, máximo duro 2048 MB, por defecto 1800 MB, con un
   **suelo de 700 MB disponibles** que se comprueba antes de cada asignación y en cada tick del bucle
   de mantenimiento. Con ese suelo ambos hosts se estabilizan alrededor del 82-83 % de memoria usada.
-- CPU mediante runspaces con ciclo de trabajo sobre una ventana de 1000 ms, prioridad de proceso
-  `BelowNormal`, máximo 8 trabajadores.
+- CPU mediante procesos trabajadores efímeros con ciclo de trabajo sobre una ventana de 1000 ms,
+  prioridad `BelowNormal` y máximo 8 trabajadores. Azure Arc Run Command ejecuta el payload dentro
+  de un *job object* de Windows con la tasa de CPU limitada, por lo que los hilos creados dentro del
+  propio proceso nunca pueden elevar la CPU de la máquina; los trabajadores se crean por tanto con
+  `Win32_Process`, fuera de ese *job object*. Cada trabajador calcula su propia fecha límite a partir
+  de la ventana aprobada restante, de modo que no puede sobrevivir a la ventana ni aunque el proceso
+  padre se termine bruscamente.
 - Duración validada entre 300 y 900 segundos, por defecto **840 s (14 min)**. El payload se
   autotermina por su propia fecha límite.
-- El bloque `finally` libera siempre toda la memoria, cierra los runspaces, restaura la prioridad y
-  emite el evento `5102`.
+- El bloque `finally` libera siempre toda la memoria, detiene todos los procesos trabajadores,
+  restaura la prioridad y emite el evento `5102`.
 - Los recursos Run Command se llaman `perfops-*` y los borra el script de recuperación.
 - Sin tarea programada, sin servicio, sin cambio de registro más allá del origen de eventos, sin
   reinicio, sin descarga de red, sin persistencia.
