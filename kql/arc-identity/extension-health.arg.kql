@@ -1,7 +1,9 @@
+// The ARG name field of an Arc machine extension contains only the extension name, so the parent
+// machine is derived from the resource ID, whose casing the provider does not normalize.
 resources
 | where type =~ "microsoft.hybridcompute/machines/extensions"
 | where resourceGroup =~ "rg-arcbox-itpro-weu-002"
-| extend Machine=tostring(split(name, "/")[0]), Extension=tostring(split(name, "/")[1])
+| extend Machine=tostring(split(tolower(id), "/")[8]), Extension=name
 | where Machine in~ ("ArcBox-Win2K22", "ArcBox-Win2K25")
 | where Extension =~ "AzureMonitorWindowsAgent"
 | project Machine, Extension, ProvisioningState=tostring(properties.provisioningState),

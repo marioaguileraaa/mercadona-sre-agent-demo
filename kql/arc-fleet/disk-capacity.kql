@@ -1,0 +1,24 @@
+// Log Analytics: law-arcbox-demo-001. Fictional technical SRE demo; role labels are synthetic.
+// Fleet disk capacity. Read-only Linux pseudo mounts such as /snap, /sys and /run always report
+// 0 % free by design, so they are excluded instead of being reported as capacity incidents.
+// This is a capacity report only; no alert rule is bound to it.
+let FleetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-sql",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-01",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-02"
+]);
+InsightsMetrics
+| where TimeGenerated >= ago(6h)
+| where set_has_element(FleetResourceIds, tolower(_ResourceId))
+| where Namespace == "LogicalDisk" and Name in ("FreeSpacePercentage", "FreeSpaceMB")
+| extend Mount = tostring(parse_json(Tags)["vm.azm.ms/mountId"])
+| where isnotempty(Mount)
+| where not (Mount startswith "/snap/" or Mount startswith "/sys/" or Mount startswith "/run/")
+| summarize Value = avg(Val) by Machine = tostring(split(tolower(_ResourceId), "/")[-1]), Mount, Name
+| evaluate pivot(Name, any(Value))
+| project Machine, Mount,
+    FreeSpacePercentage = round(FreeSpacePercentage, 1),
+    FreeSpaceMB = round(FreeSpaceMB, 0)
+| order by FreeSpacePercentage asc, Machine asc, Mount asc

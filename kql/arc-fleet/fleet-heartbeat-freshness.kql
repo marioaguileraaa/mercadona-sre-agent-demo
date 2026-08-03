@@ -1,0 +1,47 @@
+// Log Analytics: law-arcbox-demo-001. Fictional technical SRE demo; role labels are synthetic.
+// Arc fleet connectivity freshness. Gaps outside the ArcBox operating window
+// (08:20 Europe/Madrid through the fixed 18:00 UTC auto-shutdown) are expected, not incidents.
+let FleetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-sql",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-01",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-02"
+]);
+let FleetRoles = datatable(MachineKey: string, DemoRole: string, DemoHost: string, DemoSite: string)
+[
+  "arcbox-win2k22", "adfs", "adfs-01", "site-a",
+  "arcbox-win2k25", "domain-controller", "dc-01", "site-a",
+  "arcbox-sql", "identity-sql", "sql-01", "site-b",
+  "arcbox-ubuntu-01", "linux-edge", "edge-01", "site-b",
+  "arcbox-ubuntu-02", "linux-edge", "edge-02", "site-b"
+];
+let Expected =
+  print ResourceIds = FleetResourceIds
+  | mv-expand ResourceId = ResourceIds to typeof(string)
+  | project ResourceId = tolower(ResourceId), MachineKey = tostring(split(tolower(ResourceId), "/")[-1]);
+let Signals =
+  union
+    (Heartbeat
+      | where TimeGenerated >= ago(24h)
+      | where set_has_element(FleetResourceIds, tolower(_ResourceId))
+      | summarize LastSeen = max(TimeGenerated), Samples = count() by MachineKey = tostring(split(tolower(_ResourceId), "/")[-1]), Signal = "Heartbeat"),
+    (InsightsMetrics
+      | where TimeGenerated >= ago(24h)
+      | where set_has_element(FleetResourceIds, tolower(_ResourceId))
+      | where Namespace == "Processor" and Name == "UtilizationPercentage"
+      | summarize LastSeen = max(TimeGenerated), Samples = count() by MachineKey = tostring(split(tolower(_ResourceId), "/")[-1]), Signal = "InsightsMetrics");
+Expected
+| join kind=leftouter FleetRoles on MachineKey
+| join kind=leftouter Signals on MachineKey
+| project
+    DemoSite = coalesce(DemoSite, "unmapped"),
+    DemoRole = coalesce(DemoRole, "unmapped"),
+    DemoHost = coalesce(DemoHost, "unmapped"),
+    Machine = MachineKey,
+    Signal = coalesce(Signal, "missing"),
+    LastSeen,
+    Samples24h = coalesce(Samples, 0),
+    AgeMinutes = iff(isnull(LastSeen), real(-1), round(datetime_diff("second", now(), LastSeen) / 60.0, 1)),
+    FreshWithin10m = isnotnull(LastSeen) and LastSeen >= ago(10m)
+| order by DemoSite asc, DemoRole asc, Machine asc, Signal asc

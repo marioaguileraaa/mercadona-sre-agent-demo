@@ -1,0 +1,480 @@
+{
+  "version": "Notebook/1.0",
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# ArcBox FleetOps — Azure Arc fleet observability\n\n> **Fictional technical SRE demo. Not an official Mercadona system. All stores, products, prices, carts, orders, correlation IDs and metrics are synthetic; no claims about real operations.**\n\nEste workbook muestra el **inventario, la conectividad, la salud de agentes y el consumo de recursos** de todo el parque de servidores conectados con **Azure Arc**, y es la misma telemetría que consume **Azure SRE Agent** para investigar incidentes.\n\n| Máquina Arc real | Rol de demo (etiqueta) | Host ficticio | Sitio |\n|---|---|---|---|\n| `ArcBox-Win2K22` | `adfs` | `adfs-01` | `site-a` |\n| `ArcBox-Win2K25` | `domain-controller` | `dc-01` | `site-a` |\n| `ArcBox-SQL` | `identity-sql` | `sql-01` | `site-b` |\n| `Arcbox-Ubuntu-01` | `linux-edge` | `edge-01` | `site-b` |\n| `Arcbox-Ubuntu-02` | `linux-edge` | `edge-02` | `site-b` |\n\nLos roles `adfs` y `domain-controller` son **etiquetas de presentación**: estas máquinas no ejecutan AD FS ni AD DS. Sirven para representar el patrón de operación del parque on-prem del cliente."
+      },
+      "name": "text-header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "8f0f7a6f-06f2-4a0f-9a04-2f42f0f7c101",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Ventana de tiempo",
+            "type": 4,
+            "isRequired": true,
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 43200000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 259200000 },
+                { "durationMs": 604800000 }
+              ],
+              "allowCustom": true
+            },
+            "timeContext": { "durationMs": 86400000 },
+            "value": { "durationMs": 14400000 }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters-timerange"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 1. Parque Arc de un vistazo"
+      },
+      "name": "text-section-1"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "resources | where type =~ 'microsoft.hybridcompute/machines' | where resourceGroup =~ 'rg-arcbox-itpro-weu-002' | extend Status = tostring(properties.status), OsName = tostring(properties.osName), AgentVersion = tostring(properties.agentVersion) | project Machine = name, Status, Detalle = strcat(OsName, ' · agente ', AgentVersion) | order by Machine asc",
+        "size": 3,
+        "title": "Conectividad por servidor Arc",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [ "__SUBSCRIPTION_RESOURCE_ID__" ],
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": { "columnMatch": "Machine", "formatter": 1 },
+          "leftContent": {
+            "columnMatch": "Status",
+            "formatter": 18,
+            "formatOptions": {
+              "thresholdsOptions": "icons",
+              "thresholdsGrid": [
+                { "operator": "==", "thresholdValue": "Connected", "representation": "success", "text": "{0}{1}" },
+                { "operator": "Default", "thresholdValue": null, "representation": "failed", "text": "{0}{1}" }
+              ]
+            }
+          },
+          "secondaryContent": { "columnMatch": "Detalle", "formatter": 1 },
+          "showBorder": true,
+          "size": "auto"
+        }
+      },
+      "name": "query-connectivity-tiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "resources | where type =~ 'microsoft.hybridcompute/machines' | where resourceGroup =~ 'rg-arcbox-itpro-weu-002' | extend MachineKey = tolower(name) | extend Status = tostring(properties.status), OsName = tostring(properties.osName), OsVersion = tostring(properties.osVersion), OsType = tostring(properties.osType), AgentVersion = tostring(properties.agentVersion), LastStatusChange = todatetime(properties.lastStatusChange), Domain = tostring(properties.domainName), Manufacturer = tostring(properties.detectedProperties.manufacturer), Model = tostring(properties.detectedProperties.model), LogicalCores = toint(properties.detectedProperties.logicalCoreCount), TotalPhysicalMemoryGb = toint(properties.detectedProperties.totalPhysicalMemoryInGigabytes) | join kind=leftouter ( datatable(MachineKey: string, DemoRole: string, DemoHost: string, DemoSite: string) [ 'arcbox-win2k22', 'adfs', 'adfs-01', 'site-a', 'arcbox-win2k25', 'domain-controller', 'dc-01', 'site-a', 'arcbox-sql', 'identity-sql', 'sql-01', 'site-b', 'arcbox-ubuntu-01', 'linux-edge', 'edge-01', 'site-b', 'arcbox-ubuntu-02', 'linux-edge', 'edge-02', 'site-b' ] ) on MachineKey | project Machine = name, DemoRole = coalesce(DemoRole, 'unmapped'), DemoHost = coalesce(DemoHost, 'unmapped'), DemoSite = coalesce(DemoSite, 'unmapped'), Status, OsType, OsName, OsVersion, AgentVersion, LogicalCores, TotalPhysicalMemoryGb, Domain, Manufacturer, Model, MinutosDesdeUltimoCambio = toint(datetime_diff('minute', now(), LastStatusChange)) | order by DemoRole asc, Machine asc",
+        "size": 1,
+        "title": "Inventario del parque Arc (rol de demo, SO, agente, capacidad)",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [ "__SUBSCRIPTION_RESOURCE_ID__" ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Status",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "Connected", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "failed", "text": "{0}{1}" }
+                ]
+              }
+            }
+          ],
+          "sortBy": []
+        }
+      },
+      "name": "query-fleet-inventory"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 2. Salud de agentes y extensiones\n\nCada capacidad (telemetría, change tracking, Defender, Update Manager) se entrega como una extensión de Arc. Aquí se ve el estado real de aprovisionamiento, sin modificar nada."
+      },
+      "name": "text-section-2"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "resources | where type =~ 'microsoft.hybridcompute/machines/extensions' | where resourceGroup =~ 'rg-arcbox-itpro-weu-002' | extend MachineKey = tostring(split(tolower(id), '/')[8]) | extend Extension = name, Publisher = tostring(properties.publisher), ExtensionType = tostring(properties.type), ProvisioningState = tostring(properties.provisioningState), TypeHandlerVersion = tostring(properties.typeHandlerVersion), EnableAutomaticUpgrade = tobool(properties.enableAutomaticUpgrade) | extend Capability = case(ExtensionType contains 'AzureMonitor', 'telemetry-ama', ExtensionType contains 'DependencyAgent', 'telemetry-dependency', ExtensionType contains 'ChangeTracking', 'change-tracking', ExtensionType contains 'MDE', 'defender-endpoint', ExtensionType contains 'SqlServer' or ExtensionType contains 'AdvancedThreatProtection', 'sql-arc', ExtensionType contains 'PatchExtension' or ExtensionType contains 'OsUpdate', 'update-manager', ExtensionType contains 'AdminCenter', 'windows-admin-center', ExtensionType contains 'assessment', 'server-assessment', 'other') | project Machine = MachineKey, Capability, Extension, Publisher, ProvisioningState, TypeHandlerVersion, EnableAutomaticUpgrade | order by ProvisioningState asc, Machine asc, Capability asc",
+        "size": 1,
+        "title": "Estado de extensiones Arc (solo lectura)",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [ "__SUBSCRIPTION_RESOURCE_ID__" ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "ProvisioningState",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "Succeeded", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "==", "thresholdValue": "Failed", "representation": "failed", "text": "{0}{1}" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "pending", "text": "{0}{1}" }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "name": "query-extension-health"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "resources | where type =~ 'microsoft.hybridcompute/machines/extensions' | where resourceGroup =~ 'rg-arcbox-itpro-weu-002' | extend ExtensionType = tostring(properties.type), ProvisioningState = tostring(properties.provisioningState) | extend Capability = case(ExtensionType contains 'AzureMonitor', 'telemetry-ama', ExtensionType contains 'DependencyAgent', 'telemetry-dependency', ExtensionType contains 'ChangeTracking', 'change-tracking', ExtensionType contains 'MDE', 'defender-endpoint', ExtensionType contains 'SqlServer' or ExtensionType contains 'AdvancedThreatProtection', 'sql-arc', ExtensionType contains 'PatchExtension' or ExtensionType contains 'OsUpdate', 'update-manager', ExtensionType contains 'AdminCenter', 'windows-admin-center', ExtensionType contains 'assessment', 'server-assessment', 'other') | summarize Total = count(), Correctas = countif(ProvisioningState =~ 'Succeeded'), ConError = countif(ProvisioningState =~ 'Failed') by Capability | extend PorcentajeCorrecto = round(100.0 * Correctas / Total, 1) | order by ConError desc, Capability asc",
+        "size": 0,
+        "title": "Cobertura de capacidades en el parque",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [ "__SUBSCRIPTION_RESOURCE_ID__" ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "PorcentajeCorrecto", "formatter": 4, "formatOptions": { "palette": "redGreen" } },
+            { "columnMatch": "ConError", "formatter": 4, "formatOptions": { "palette": "red" } }
+          ]
+        }
+      },
+      "name": "query-capability-coverage"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let LookbackWindow = 24h; let HeartbeatFreshness = Heartbeat | where TimeGenerated >= ago(LookbackWindow) | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]) | summarize UltimoDato = max(TimeGenerated), Muestras = count() by MachineKey, Signal = 'Heartbeat'; let MetricFreshness = InsightsMetrics | where TimeGenerated >= ago(LookbackWindow) | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]) | summarize UltimoDato = max(TimeGenerated), Muestras = count() by MachineKey, Signal = 'InsightsMetrics'; union HeartbeatFreshness, MetricFreshness | extend MinutosDeRetraso = round(datetime_diff('second', now(), UltimoDato) / 60.0, 1) | extend Estado = case(MinutosDeRetraso <= 10, 'Fresco', MinutosDeRetraso <= 60, 'Retrasado', 'Sin datos recientes') | project MachineKey, Signal, Estado, MinutosDeRetraso, Muestras, UltimoDato | order by MachineKey asc, Signal asc",
+        "size": 1,
+        "title": "Frescura de telemetría por servidor y señal (últimas 24 h)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContext": { "durationMs": 86400000 },
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Estado",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "Fresco", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "==", "thresholdValue": "Retrasado", "representation": "warning", "text": "{0}{1}" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "failed", "text": "{0}{1}" }
+                ]
+              }
+            },
+            { "columnMatch": "MinutosDeRetraso", "formatter": 4, "formatOptions": { "palette": "greenRed" } }
+          ]
+        }
+      },
+      "name": "query-telemetry-freshness"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 3. Presión de recursos: CPU y memoria\n\nEstas son las series que evalúan las reglas `alert-arcbox-fleet-cpu-saturation` (CPU ≥ 85 % sostenida) y `alert-arcbox-fleet-memory-pressure` (memoria usada ≥ 80 % sostenida)."
+      },
+      "name": "text-section-3"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "InsightsMetrics | where Namespace == 'Processor' and Name == 'UtilizationPercentage' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]) | summarize CpuPercent = round(avg(Val), 2) by bin(TimeGenerated, 5m), MachineKey | order by TimeGenerated asc",
+        "size": 0,
+        "title": "CPU media por servidor (bins de 5 min)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContextFromParameter": "TimeRange",
+        "visualization": "timechart",
+        "chartSettings": {
+          "yAxis": [ "CpuPercent" ],
+          "ySettings": { "min": 0, "max": 100 },
+          "showLegend": true
+        }
+      },
+      "name": "query-cpu-timechart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "InsightsMetrics | where Namespace == 'Memory' and Name == 'AvailableMB' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]), TotalMemoryMb = todouble(todynamic(Tags)['vm.azm.ms/memorySizeMB']) | where TotalMemoryMb > 0 | extend MemoryUsedPercent = 100.0 * (TotalMemoryMb - Val) / TotalMemoryMb | summarize MemoryUsedPercent = round(avg(MemoryUsedPercent), 2) by bin(TimeGenerated, 5m), MachineKey | order by TimeGenerated asc",
+        "size": 0,
+        "title": "Memoria usada por servidor (bins de 5 min)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContextFromParameter": "TimeRange",
+        "visualization": "timechart",
+        "chartSettings": {
+          "yAxis": [ "MemoryUsedPercent" ],
+          "ySettings": { "min": 0, "max": 100 },
+          "showLegend": true
+        }
+      },
+      "name": "query-memory-timechart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let CpuSaturationPercent = 85.0; let MemoryPressurePercent = 80.0; let CpuSnapshot = InsightsMetrics | where TimeGenerated >= ago(15m) | where Namespace == 'Processor' and Name == 'UtilizationPercentage' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]) | summarize CpuMedia = round(avg(Val), 1), CpuMaxima = round(max(Val), 1), MuestrasCpuEnUmbral = countif(Val >= CpuSaturationPercent) by MachineKey; let MemorySnapshot = InsightsMetrics | where TimeGenerated >= ago(15m) | where Namespace == 'Memory' and Name == 'AvailableMB' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]), TotalMemoryMb = todouble(todynamic(Tags)['vm.azm.ms/memorySizeMB']) | where TotalMemoryMb > 0 | extend MemoryUsedPercent = 100.0 * (TotalMemoryMb - Val) / TotalMemoryMb | summarize MemoriaMedia = round(avg(MemoryUsedPercent), 1), MemoriaMaxima = round(max(MemoryUsedPercent), 1), MemoriaLibreMinimaMb = round(min(Val), 0), MuestrasMemoriaEnUmbral = countif(MemoryUsedPercent >= MemoryPressurePercent) by MachineKey; CpuSnapshot | join kind=fullouter MemorySnapshot on MachineKey | extend MachineKey = coalesce(MachineKey, MachineKey1) | join kind=leftouter ( datatable(MachineKey: string, DemoRole: string) [ 'arcbox-win2k22', 'adfs', 'arcbox-win2k25', 'domain-controller', 'arcbox-sql', 'identity-sql', 'arcbox-ubuntu-01', 'linux-edge', 'arcbox-ubuntu-02', 'linux-edge' ] ) on MachineKey | extend Veredicto = case(MuestrasCpuEnUmbral >= 8 and MuestrasMemoriaEnUmbral >= 8, 'CPU y memoria en umbral', MuestrasCpuEnUmbral >= 8, 'CPU en umbral', MuestrasMemoriaEnUmbral >= 8, 'Memoria en umbral', MuestrasCpuEnUmbral > 0 or MuestrasMemoriaEnUmbral > 0, 'Picos aislados', 'Dentro de la linea base') | project Machine = MachineKey, DemoRole = coalesce(DemoRole, 'unmapped'), Veredicto, CpuMedia, CpuMaxima, MuestrasCpuEnUmbral, MemoriaMedia, MemoriaMaxima, MemoriaLibreMinimaMb, MuestrasMemoriaEnUmbral | order by Veredicto asc, Machine asc",
+        "size": 1,
+        "title": "Instantánea de presión — últimos 15 min (lo mismo que evalúan las alertas)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContext": { "durationMs": 900000 },
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Veredicto",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "Dentro de la linea base", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "==", "thresholdValue": "Picos aislados", "representation": "warning", "text": "{0}{1}" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "failed", "text": "{0}{1}" }
+                ]
+              }
+            },
+            { "columnMatch": "CpuMedia", "formatter": 4, "formatOptions": { "palette": "greenRed" } },
+            { "columnMatch": "MemoriaMedia", "formatter": 4, "formatOptions": { "palette": "greenRed" } },
+            { "columnMatch": "MuestrasCpuEnUmbral", "formatter": 4, "formatOptions": { "palette": "greenRed" } },
+            { "columnMatch": "MuestrasMemoriaEnUmbral", "formatter": 4, "formatOptions": { "palette": "greenRed" } }
+          ]
+        }
+      },
+      "name": "query-pressure-snapshot"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 4. Rendimiento agregado y capacidad"
+      },
+      "name": "text-section-4"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let CpuSeries = InsightsMetrics | where Namespace == 'Processor' and Name == 'UtilizationPercentage' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]) | summarize CpuMedia = round(avg(Val), 1), CpuP95 = round(percentile(Val, 95), 1), CpuMaxima = round(max(Val), 1), Muestras = count() by MachineKey; let MemorySeries = InsightsMetrics | where Namespace == 'Memory' and Name == 'AvailableMB' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]), TotalMemoryMb = todouble(todynamic(Tags)['vm.azm.ms/memorySizeMB']) | where TotalMemoryMb > 0 | extend MemoryUsedPercent = 100.0 * (TotalMemoryMb - Val) / TotalMemoryMb | summarize MemoriaMedia = round(avg(MemoryUsedPercent), 1), MemoriaP95 = round(percentile(MemoryUsedPercent, 95), 1), MemoriaMaxima = round(max(MemoryUsedPercent), 1), MemoriaTotalMb = round(max(TotalMemoryMb), 0) by MachineKey; let DiskLatency = InsightsMetrics | where Namespace == 'LogicalDisk' and Name in ('ReadLatencyMs', 'WriteLatencyMs') | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]) | summarize LatenciaDiscoMediaMs = round(avg(Val), 2), LatenciaDiscoP95Ms = round(percentile(Val, 95), 2) by MachineKey; CpuSeries | join kind=leftouter MemorySeries on MachineKey | join kind=leftouter DiskLatency on MachineKey | join kind=leftouter ( datatable(MachineKey: string, DemoRole: string, DemoHost: string) [ 'arcbox-win2k22', 'adfs', 'adfs-01', 'arcbox-win2k25', 'domain-controller', 'dc-01', 'arcbox-sql', 'identity-sql', 'sql-01', 'arcbox-ubuntu-01', 'linux-edge', 'edge-01', 'arcbox-ubuntu-02', 'linux-edge', 'edge-02' ] ) on MachineKey | project Machine = MachineKey, DemoRole = coalesce(DemoRole, 'unmapped'), DemoHost = coalesce(DemoHost, 'unmapped'), CpuMedia, CpuP95, CpuMaxima, MemoriaMedia, MemoriaP95, MemoriaMaxima, MemoriaTotalMb, LatenciaDiscoMediaMs, LatenciaDiscoP95Ms, Muestras | order by DemoRole asc, Machine asc",
+        "size": 1,
+        "title": "Resumen de rendimiento por servidor en la ventana seleccionada",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContextFromParameter": "TimeRange",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "CpuP95", "formatter": 4, "formatOptions": { "palette": "greenRed" } },
+            { "columnMatch": "MemoriaP95", "formatter": 4, "formatOptions": { "palette": "greenRed" } },
+            { "columnMatch": "LatenciaDiscoP95Ms", "formatter": 4, "formatOptions": { "palette": "greenRed" } }
+          ]
+        }
+      },
+      "name": "query-performance-summary"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "InsightsMetrics | where Namespace == 'LogicalDisk' and Name == 'FreeSpacePercentage' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]), Mount = tostring(todynamic(Tags)['vm.azm.ms/mountId']) | where isnotempty(Mount) | where not (Mount startswith '/snap/' or Mount startswith '/sys/' or Mount startswith '/run/') | summarize EspacioLibreMedio = round(avg(Val), 1), EspacioLibreMinimo = round(min(Val), 1), Muestras = count() by MachineKey, Mount | extend Estado = case(EspacioLibreMinimo < 10, 'Critico', EspacioLibreMinimo < 20, 'Atencion', 'Correcto') | project Machine = MachineKey, Mount, Estado, EspacioLibreMedio, EspacioLibreMinimo, Muestras | order by EspacioLibreMinimo asc",
+        "size": 1,
+        "title": "Espacio libre en disco por punto de montaje",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContextFromParameter": "TimeRange",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Estado",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "Correcto", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "==", "thresholdValue": "Atencion", "representation": "warning", "text": "{0}{1}" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "failed", "text": "{0}{1}" }
+                ]
+              }
+            },
+            { "columnMatch": "EspacioLibreMinimo", "formatter": 4, "formatOptions": { "palette": "redGreen" } }
+          ]
+        }
+      },
+      "name": "query-disk-capacity"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let CpuBaseline = datatable(MachineKey: string, BaselineCpuP95: real, BaselineMemoryP95: real) [ 'arcbox-win2k22', 9.0, 46.5, 'arcbox-win2k25', 16.6, 60.5, 'arcbox-sql', 11.3, 59.6, 'arcbox-ubuntu-01', 1.5, 19.5, 'arcbox-ubuntu-02', 1.5, 19.3 ]; let DailyCpu = InsightsMetrics | where TimeGenerated >= ago(7d) | where Namespace == 'Processor' and Name == 'UtilizationPercentage' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]) | summarize CpuP95 = round(percentile(Val, 95), 1) by Dia = bin(TimeGenerated, 1d), MachineKey; let DailyMemory = InsightsMetrics | where TimeGenerated >= ago(7d) | where Namespace == 'Memory' and Name == 'AvailableMB' | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]), TotalMemoryMb = todouble(todynamic(Tags)['vm.azm.ms/memorySizeMB']) | where TotalMemoryMb > 0 | extend MemoryUsedPercent = 100.0 * (TotalMemoryMb - Val) / TotalMemoryMb | summarize MemoriaP95 = round(percentile(MemoryUsedPercent, 95), 1) by Dia = bin(TimeGenerated, 1d), MachineKey; DailyCpu | join kind=inner DailyMemory on MachineKey, Dia | join kind=leftouter CpuBaseline on MachineKey | extend DesviacionCpu = round(CpuP95 - BaselineCpuP95, 1), DesviacionMemoria = round(MemoriaP95 - BaselineMemoryP95, 1) | project Dia, Machine = MachineKey, CpuP95, BaselineCpuP95, DesviacionCpu, MemoriaP95, BaselineMemoryP95, DesviacionMemoria | order by Dia desc, Machine asc",
+        "size": 1,
+        "title": "Tendencia diaria p95 (7 días) frente a la línea base documentada",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContext": { "durationMs": 604800000 },
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "DesviacionCpu", "formatter": 4, "formatOptions": { "palette": "greenRed" } },
+            { "columnMatch": "DesviacionMemoria", "formatter": 4, "formatOptions": { "palette": "greenRed" } }
+          ]
+        }
+      },
+      "name": "query-capacity-trend"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 5. Cambios, configuración y señales de identidad sintéticas"
+      },
+      "name": "text-section-5"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "union isfuzzy=true (ConfigurationChange | extend MachineKey = tostring(split(tolower(_ResourceId), '/')[-1]) | summarize Cambios = count(), UltimoCambio = max(TimeGenerated) by Machine = MachineKey, TipoDeCambio = tostring(ConfigChangeType)), (datatable(Machine: string, TipoDeCambio: string, Cambios: long, UltimoCambio: datetime) []) | where isnotempty(Machine) | extend TipoDeCambio = iif(isempty(TipoDeCambio), 'sin-clasificar', TipoDeCambio) | project Machine, TipoDeCambio, Cambios, UltimoCambio | order by Cambios desc",
+        "size": 1,
+        "title": "Change Tracking: cambios detectados por servidor y tipo",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContextFromParameter": "TimeRange",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [ { "columnMatch": "Cambios", "formatter": 4, "formatOptions": { "palette": "blue" } } ]
+        }
+      },
+      "name": "query-change-inventory"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "union isfuzzy=true (Event | where Source == 'MercadonaSyntheticIdentity' | extend MachineKey = tolower(Computer) | summarize Eventos = count(), UltimoEvento = max(TimeGenerated) by Machine = MachineKey, EventID), (datatable(Machine: string, EventID: int, Eventos: long, UltimoEvento: datetime) []) | where isnotempty(Machine) | extend Escenario = case(EventID == 4101, 'Fallo de federacion sintetico', EventID == 4102, 'Recuperacion sintetica', 'Otro') | project Machine, EventID, Escenario, Eventos, UltimoEvento | order by UltimoEvento desc",
+        "size": 1,
+        "title": "Eventos sintéticos del escenario de identidad Arc (origen MercadonaSyntheticIdentity)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [ "__WORKSPACE_RESOURCE_ID__" ],
+        "timeContextFromParameter": "TimeRange",
+        "visualization": "table"
+      },
+      "name": "query-synthetic-identity-events"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 6. Reglas de alerta y alertas activas\n\nCuando una regla `ArcBox FleetOps` se dispara, el filtro de incidentes `arc-fleet-performance-sev2` entrega el incidente a **Azure SRE Agent**, que investiga en modo **Review** y propone recomendaciones sin ejecutar cambios."
+      },
+      "name": "text-section-6"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "resources | where type =~ 'microsoft.insights/scheduledqueryrules' | extend DisplayName = tostring(properties.displayName), Severity = toint(properties.severity), Enabled = tobool(properties.enabled), EvaluationFrequency = tostring(properties.evaluationFrequency), WindowSize = tostring(properties.windowSize), AutoMitigate = tobool(properties.autoMitigate) | where DisplayName startswith 'ArcBox' | project Regla = name, DisplayName, Severity, Enabled, EvaluationFrequency, WindowSize, AutoMitigate, ResourceGroup = resourceGroup | order by DisplayName asc",
+        "size": 1,
+        "title": "Reglas de alerta del escenario Arc",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [ "__SUBSCRIPTION_RESOURCE_ID__" ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Enabled",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "true", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "failed", "text": "{0}{1}" }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "name": "query-alert-rules"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "alertsmanagementresources | where type =~ 'microsoft.alertsmanagement/alerts' | extend AlertRule = tostring(properties.essentials.alertRule), Severity = tostring(properties.essentials.severity), MonitorCondition = tostring(properties.essentials.monitorCondition), AlertState = tostring(properties.essentials.alertState), StartTime = todatetime(properties.essentials.startDateTime), LastModified = todatetime(properties.essentials.lastModifiedDateTime) | where AlertRule startswith 'alert-arcbox' | project AlertRule, Severity, MonitorCondition, AlertState, StartTime, LastModified | order by StartTime desc | take 50",
+        "size": 1,
+        "title": "Alertas del parque Arc (histórico reciente del servicio de alertas)",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": [ "__SUBSCRIPTION_RESOURCE_ID__" ],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "MonitorCondition",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "icons",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "Resolved", "representation": "success", "text": "{0}{1}" },
+                  { "operator": "Default", "thresholdValue": null, "representation": "failed", "text": "{0}{1}" }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "name": "query-fired-alerts"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n\n**Fictional technical SRE demo. Not an official Mercadona system. All stores, products, prices, carts, orders, correlation IDs and metrics are synthetic; no claims about real operations.**\n\nTodas las consultas de este workbook son de **solo lectura y agregadas**. No exponen secretos, credenciales ni datos personales, y no modifican ningún recurso."
+      },
+      "name": "text-footer"
+    }
+  ],
+  "fallbackResourceIds": [ "__WORKSPACE_RESOURCE_ID__" ]
+}

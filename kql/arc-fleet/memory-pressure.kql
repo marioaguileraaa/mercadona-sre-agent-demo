@@ -1,0 +1,32 @@
+// Log Analytics: law-arcbox-demo-001. Fictional technical SRE demo; role labels are synthetic.
+// Sustained memory pressure detector. Mirrors alert-arcbox-fleet-memory-pressure:
+// at least 8 one-minute samples at or above 80 % used inside a 15-minute window.
+// Used percent is derived from Memory/AvailableMB and the vm.azm.ms/memorySizeMB tag that
+// the existing VM Insights DCR already publishes; no extra counter is collected.
+// Verified 7-day baseline: 0 windows would have matched on any fleet machine.
+let PressurePercent = 80.0;
+let MinimumBreachingSamples = 8;
+let FleetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-sql",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-01",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-02"
+]);
+InsightsMetrics
+| where TimeGenerated >= ago(15m)
+| where set_has_element(FleetResourceIds, tolower(_ResourceId))
+| where Namespace == "Memory" and Name == "AvailableMB"
+| extend TotalMemoryMB = todouble(parse_json(Tags)["vm.azm.ms/memorySizeMB"])
+| where isnotnull(TotalMemoryMB) and TotalMemoryMB > 0
+| extend UsedPercent = (TotalMemoryMB - Val) * 100.0 / TotalMemoryMB
+| summarize
+    Samples = count(),
+    BreachingSamples = countif(UsedPercent >= PressurePercent),
+    AverageUsedPercent = round(avg(UsedPercent), 1),
+    MaximumUsedPercent = round(max(UsedPercent), 1),
+    MinimumAvailableMB = round(min(Val), 0)
+    by Machine = tostring(split(tolower(_ResourceId), "/")[-1])
+| where BreachingSamples >= MinimumBreachingSamples
+| project Machine, Samples, BreachingSamples, AverageUsedPercent, MaximumUsedPercent, MinimumAvailableMB
+| order by BreachingSamples desc, Machine asc

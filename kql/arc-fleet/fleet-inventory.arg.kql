@@ -1,0 +1,34 @@
+// Azure Resource Graph. Fictional technical SRE demo; role labels are synthetic presentation
+// metadata and do not mean the hosts run AD FS or AD DS.
+// Fleet inventory for every Azure Arc-enabled server in the demo scope.
+resources
+| where type =~ "microsoft.hybridcompute/machines"
+| where resourceGroup =~ "rg-arcbox-itpro-weu-002"
+| extend MachineKey = tolower(name)
+| join kind=leftouter (
+    datatable(MachineKey: string, DemoRole: string, DemoHost: string, DemoSite: string)
+    [
+      "arcbox-win2k22", "adfs", "adfs-01", "site-a",
+      "arcbox-win2k25", "domain-controller", "dc-01", "site-a",
+      "arcbox-sql", "identity-sql", "sql-01", "site-b",
+      "arcbox-ubuntu-01", "linux-edge", "edge-01", "site-b",
+      "arcbox-ubuntu-02", "linux-edge", "edge-02", "site-b"
+    ]
+  ) on MachineKey
+| project
+    Machine = name,
+    DemoRole = coalesce(DemoRole, "unmapped"),
+    DemoHost = coalesce(DemoHost, "unmapped"),
+    DemoSite = coalesce(DemoSite, "unmapped"),
+    Status = tostring(properties.status),
+    OsSku = tostring(properties.osSku),
+    OsVersion = tostring(properties.osVersion),
+    AgentVersion = tostring(properties.agentVersion),
+    AgentAutoUpgrade = tobool(properties.agentUpgrade.enableAutomaticUpgrade),
+    Cores = tostring(properties.detectedProperties.coreCount),
+    MemoryGiB = tostring(properties.detectedProperties.totalPhysicalMemoryInGigabytes),
+    Model = tostring(properties.detectedProperties.model),
+    LastStatusChange = todatetime(properties.lastStatusChange),
+    Location = location,
+    ResourceId = tolower(id)
+| order by DemoSite asc, DemoRole asc, Machine asc

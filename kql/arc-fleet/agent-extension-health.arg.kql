@@ -1,0 +1,43 @@
+// Azure Resource Graph. Fictional technical SRE demo; read-only extension posture for the whole
+// Arc-enabled fleet. Reports state only and never changes, installs or upgrades an extension.
+// The parent machine is derived from the resource ID because the ARG name field of an Arc machine
+// extension contains only the extension name, and the ID casing is not normalized by the provider.
+resources
+| where type =~ "microsoft.hybridcompute/machines/extensions"
+| where resourceGroup =~ "rg-arcbox-itpro-weu-002"
+| extend MachineKey = tostring(split(tolower(id), "/")[8])
+| extend
+    Extension = name,
+    Publisher = tostring(properties.publisher),
+    ExtensionType = tostring(properties.type),
+    ProvisioningState = tostring(properties.provisioningState),
+    TypeHandlerVersion = tostring(properties.typeHandlerVersion),
+    EnableAutomaticUpgrade = tobool(properties.enableAutomaticUpgrade)
+| extend Capability = case(
+    ExtensionType contains "AzureMonitor", "telemetry-ama",
+    ExtensionType contains "DependencyAgent", "telemetry-dependency",
+    ExtensionType contains "ChangeTracking", "change-tracking",
+    ExtensionType contains "MDE", "defender-endpoint",
+    ExtensionType contains "SqlServer" or ExtensionType contains "AdvancedThreatProtection", "sql-arc",
+    ExtensionType contains "PatchExtension" or ExtensionType contains "OsUpdate", "update-manager",
+    ExtensionType contains "AdminCenter", "windows-admin-center",
+    ExtensionType contains "assessment", "server-assessment",
+    "other")
+| join kind=leftouter (
+    datatable(MachineKey: string, DemoRole: string, DemoHost: string)
+    [
+      "arcbox-win2k22", "adfs", "adfs-01",
+      "arcbox-win2k25", "domain-controller", "dc-01",
+      "arcbox-sql", "identity-sql", "sql-01",
+      "arcbox-ubuntu-01", "linux-edge", "edge-01",
+      "arcbox-ubuntu-02", "linux-edge", "edge-02"
+    ]
+  ) on MachineKey
+| project
+    Machine = MachineKey,
+    DemoRole = coalesce(DemoRole, "unmapped"),
+    DemoHost = coalesce(DemoHost, "unmapped"),
+    Capability, Extension, Publisher, ExtensionType, ProvisioningState,
+    TypeHandlerVersion, EnableAutomaticUpgrade,
+    Healthy = ProvisioningState =~ "Succeeded"
+| order by Healthy asc, Machine asc, Capability asc, Extension asc

@@ -44,7 +44,9 @@ La ventana auditada de dos horas aporta esta referencia informativa para correla
 | `ArcBox-Win2K22` | 4,38 % / 11,51 % | ~2,53 GB | ~1 ms | 80,31 % |
 | `ArcBox-Win2K25` | 9,71 % / 19,32 % | ~2,19 GB | ~1,1-1,3 ms | 58,73 % |
 
-Estos valores no son umbrales de alerta ni SLO. En este primer POC, CPU, memoria, disco y red se usan solo para correlación e informes. No existe una alerta Sev2 por valor de rendimiento: la regla cuantitativa determinista es la ráfaga sintética acotada; la otra Sev2 detecta ausencia de Heartbeat/InsightsMetrics durante la ventana operativa, no degradación de sus valores.
+Estos valores no son umbrales de alerta ni SLO **de este escenario de identidad**. En este POC, CPU, memoria, disco y red se usan solo para correlación e informes: sus dos reglas Sev2 son la ráfaga sintética acotada y la ausencia de Heartbeat/InsightsMetrics durante la ventana operativa, no la degradación de valores de rendimiento.
+
+El escenario aditivo de observabilidad de flota (`ArcBox FleetOps`) sí añade dos reglas Sev2 por valor de rendimiento sobre el mismo parque: `alert-arcbox-fleet-cpu-saturation` (`>= 8` muestras `>= 85 %` de CPU en 15 minutos) y `alert-arcbox-fleet-memory-pressure` (`>= 8` muestras `>= 80 %` de memoria usada en 15 minutos). Sus umbrales no salen de esta ventana de dos horas sino de una línea base real de 7 días con backtest de 344 ventanas y cero disparos históricos. Los prefijos de `displayName` `ArcBox IdentityOps` y `ArcBox FleetOps` mantienen ambos escenarios separados en el enrutado de incidentes del agente. Ver [`arquitectura-arc-fleet-observability.md`](arquitectura-arc-fleet-observability.md).
 
 ## Flujo
 

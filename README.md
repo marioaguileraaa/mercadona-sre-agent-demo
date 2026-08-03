@@ -188,6 +188,42 @@ The Spanish architecture, production mapping, exact approved command sequence, d
 - [`docs/runbooks/arc-identidad-operaciones.md`](docs/runbooks/arc-identidad-operaciones.md);
 - [`docs/guia-demo-identidad-arc.md`](docs/guia-demo-identidad-arc.md).
 
+## Additive Azure Arc fleet observability POC
+
+A second additive Arc scenario answers a different customer question: monitoring and visualization of
+the **whole** Arc-connected on-premises fleet, plus SRE Agent investigation of real resource
+saturation. It reuses the same ArcBox machines, the same `law-arcbox-demo-001` workspace, the same
+`ag-mercadona-sre-demo` action group and the same `Review`/`Low` agent. No new Data Collection Rule
+is created: performance data comes from the pre-existing VM Insights rule at 60 s sampling.
+
+It adds an Azure Monitor workbook with 15 validated panels (connectivity, inventory, extension
+health, capability coverage, telemetry freshness, CPU/memory time series, the 15-minute alert-equivalent
+snapshot, 7-day p95 versus baseline, disk capacity, change tracking, and fired alerts) and two Sev2
+scheduled query rules prefixed `ArcBox FleetOps`: sustained CPU saturation (`>= 8` samples at `>= 85 %`
+in 15 minutes) and sustained memory pressure (`>= 8` samples at `>= 80 %` used). Both thresholds were
+derived from a real 7-day baseline and backtested over 344 windows across 5 machines with zero
+historical firings, so a firing is a genuine anomaly rather than a normal peak.
+
+Pressure is injected through bounded Arc Run Commands against **only** `ArcBox-Win2K22` and
+`ArcBox-Win2K25`, with a hard 2048 MB ceiling, a 700 MB available-memory floor enforced on every
+allocation and on every hold-loop tick, `BelowNormal` process priority, a self-imposed deadline, and a
+`finally` block that always frees everything. Nothing persists on the guests.
+
+Planning is the default and performs no deployment:
+
+```powershell
+.\scripts\deploy-arc-fleet-observability.ps1
+.\scripts\configure-arc-fleet-sre-agent.ps1
+.\scripts\verify-arc-fleet-observability.ps1
+```
+
+The Spanish architecture, 60-minute demo choreography, safety envelope, triage steps and rollback are
+documented in:
+
+- [`docs/arquitectura-arc-fleet-observability.md`](docs/arquitectura-arc-fleet-observability.md);
+- [`docs/guia-demo-arc-fleet-60min.md`](docs/guia-demo-arc-fleet-60min.md);
+- [`docs/runbooks/arc-fleet-saturacion-recursos.md`](docs/runbooks/arc-fleet-saturacion-recursos.md).
+
 ## Local validation
 
 ```powershell
@@ -208,11 +244,14 @@ az bicep build --file .\infra\trigger-bridge.bicep
 az bicep lint --file .\infra\trigger-bridge.bicep
 az bicep build --file .\infra\arc-identity.bicep
 az bicep lint --file .\infra\arc-identity.bicep
+az bicep build --file .\infra\arc-fleet-observability.bicep
+az bicep lint --file .\infra\arc-fleet-observability.bicep
 pwsh -NoProfile -File .\scripts\test-configure-sre-agent-contract.ps1
 pwsh -NoProfile -File .\scripts\test-sre-agent-github-preflight-contract.ps1
 pwsh -NoProfile -File .\scripts\test-azure-demo-common-contract.ps1
 pwsh -NoProfile -File .\scripts\test-retail-incident-contract.ps1
 pwsh -NoProfile -File .\scripts\test-arc-identity-contract.ps1
+pwsh -NoProfile -File .\scripts\test-arc-fleet-contract.ps1
 pwsh -NoProfile -File .\scripts\test-sre-agent-what-if-contract.ps1
 ```
 

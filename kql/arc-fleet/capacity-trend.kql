@@ -1,0 +1,42 @@
+// Log Analytics: law-arcbox-demo-001. Fictional technical SRE demo; role labels are synthetic.
+// Seven-day capacity trend used by the weekly Review report. Daily p95 per machine and metric,
+// compared with the documented baseline so the agent can describe drift instead of raw values.
+let FleetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-sql",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-01",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-02"
+]);
+// Documented 7-day baseline captured on 2026-08-03; refresh it deliberately, never automatically.
+let BaselineP95 = datatable(MachineKey: string, Metric: string, BaselineValue: real)
+[
+  "arcbox-win2k22", "CpuPercent", 9.0,
+  "arcbox-win2k25", "CpuPercent", 16.6,
+  "arcbox-sql", "CpuPercent", 11.3,
+  "arcbox-ubuntu-01", "CpuPercent", 1.5,
+  "arcbox-ubuntu-02", "CpuPercent", 1.5,
+  "arcbox-win2k22", "MemoryUsedPercent", 46.5,
+  "arcbox-win2k25", "MemoryUsedPercent", 60.5,
+  "arcbox-sql", "MemoryUsedPercent", 59.6,
+  "arcbox-ubuntu-01", "MemoryUsedPercent", 19.3,
+  "arcbox-ubuntu-02", "MemoryUsedPercent", 19.5
+];
+InsightsMetrics
+| where TimeGenerated >= ago(7d)
+| where set_has_element(FleetResourceIds, tolower(_ResourceId))
+| where (Namespace == "Processor" and Name == "UtilizationPercentage")
+    or (Namespace == "Memory" and Name == "AvailableMB")
+| extend TotalMemoryMB = todouble(parse_json(Tags)["vm.azm.ms/memorySizeMB"])
+| extend Metric = iff(Namespace == "Processor", "CpuPercent", "MemoryUsedPercent")
+| extend Value = iff(
+    Namespace == "Processor",
+    Val,
+    iff(isnotnull(TotalMemoryMB) and TotalMemoryMB > 0, (TotalMemoryMB - Val) * 100.0 / TotalMemoryMB, real(null)))
+| where isnotnull(Value)
+| summarize DailyP95 = round(percentile(Value, 95), 1), Samples = count()
+    by MachineKey = tostring(split(tolower(_ResourceId), "/")[-1]), Metric, Day = startofday(TimeGenerated)
+| join kind=leftouter BaselineP95 on MachineKey, Metric
+| project Day, Machine = MachineKey, Metric, DailyP95, BaselineP95 = BaselineValue,
+    DriftPoints = iff(isnull(BaselineValue), real(null), round(DailyP95 - BaselineValue, 1)), Samples
+| order by Day desc, Machine asc, Metric asc

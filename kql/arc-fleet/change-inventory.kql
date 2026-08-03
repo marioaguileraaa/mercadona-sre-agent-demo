@@ -1,0 +1,20 @@
+// Log Analytics: law-arcbox-demo-001. Fictional technical SRE demo; role labels are synthetic.
+// Aggregate change-tracking correlation. Counts only; never project change details, file paths,
+// user names or event messages in a default operational report.
+// The table exists only when the existing ArcBox environment already provides Change Tracking.
+// This scenario never installs or enables that capability; report it as unavailable instead.
+let FleetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-sql",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-01",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-02"
+]);
+union isfuzzy=true (ConfigurationChange | where 1 == 0 | project TimeGenerated, _ResourceId, ConfigChangeType, ChangeCategory), ConfigurationChange
+| where TimeGenerated >= ago(24h)
+| where set_has_element(FleetResourceIds, tolower(_ResourceId))
+| summarize Changes = count(), LastChange = max(TimeGenerated)
+    by Machine = tostring(split(tolower(_ResourceId), "/")[-1]),
+       ChangeType = coalesce(tostring(ConfigChangeType), "unspecified"),
+       Category = coalesce(tostring(ChangeCategory), "unspecified")
+| order by Changes desc, Machine asc, ChangeType asc

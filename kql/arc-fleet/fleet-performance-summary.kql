@@ -1,0 +1,54 @@
+// Log Analytics: law-arcbox-demo-001. Fictional technical SRE demo; role labels are synthetic.
+// Aggregate performance posture for the whole Arc fleet over the last 24 hours.
+// Everything is reused from the existing MSVMI-ama-vmi-default-dcr VM Insights pipeline;
+// no additional performance counter is collected by this scenario.
+let FleetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-sql",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-01",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-02"
+]);
+let FleetRoles = datatable(MachineKey: string, DemoRole: string, DemoHost: string, DemoSite: string)
+[
+  "arcbox-win2k22", "adfs", "adfs-01", "site-a",
+  "arcbox-win2k25", "domain-controller", "dc-01", "site-a",
+  "arcbox-sql", "identity-sql", "sql-01", "site-b",
+  "arcbox-ubuntu-01", "linux-edge", "edge-01", "site-b",
+  "arcbox-ubuntu-02", "linux-edge", "edge-02", "site-b"
+];
+InsightsMetrics
+| where TimeGenerated >= ago(24h)
+| where set_has_element(FleetResourceIds, tolower(_ResourceId))
+| extend MachineKey = tostring(split(tolower(_ResourceId), "/")[-1])
+| extend TotalMemoryMB = todouble(parse_json(Tags)["vm.azm.ms/memorySizeMB"])
+| extend Mount = tostring(parse_json(Tags)["vm.azm.ms/mountId"])
+| extend Metric = case(
+    Namespace == "Processor" and Name == "UtilizationPercentage", "CpuPercent",
+    Namespace == "Memory" and Name == "AvailableMB", "MemoryUsedPercent",
+    Namespace == "LogicalDisk" and Name == "FreeSpacePercentage"
+      and not (Mount startswith "/snap/" or Mount startswith "/sys/" or Mount startswith "/run/"), "DiskFreePercent",
+    Namespace == "LogicalDisk" and Name == "TransferLatencyMs", "DiskLatencyMs",
+    Namespace == "Network" and Name == "ReadBytesPerSecond", "NetworkInBytesPerSecond",
+    Namespace == "Network" and Name == "WriteBytesPerSecond", "NetworkOutBytesPerSecond",
+    "")
+| where isnotempty(Metric)
+| extend Value = case(
+    Metric == "MemoryUsedPercent" and isnotnull(TotalMemoryMB) and TotalMemoryMB > 0,
+      (TotalMemoryMB - Val) * 100.0 / TotalMemoryMB,
+    Val)
+| summarize
+    Samples = count(),
+    Average = round(avg(Value), 1),
+    P95 = round(percentile(Value, 95), 1),
+    Maximum = round(max(Value), 1),
+    Minimum = round(min(Value), 1)
+    by MachineKey, Metric
+| join kind=leftouter FleetRoles on MachineKey
+| project
+    DemoSite = coalesce(DemoSite, "unmapped"),
+    DemoRole = coalesce(DemoRole, "unmapped"),
+    DemoHost = coalesce(DemoHost, "unmapped"),
+    Machine = MachineKey,
+    Metric, Samples, Average, P95, Maximum, Minimum
+| order by DemoSite asc, DemoRole asc, Machine asc, Metric asc

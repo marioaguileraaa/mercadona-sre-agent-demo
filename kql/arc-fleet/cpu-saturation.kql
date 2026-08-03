@@ -1,0 +1,26 @@
+// Log Analytics: law-arcbox-demo-001. Fictional technical SRE demo; role labels are synthetic.
+// Sustained CPU saturation detector. Mirrors alert-arcbox-fleet-cpu-saturation:
+// at least 8 one-minute samples at or above 85 % inside a 15-minute window.
+// Verified 7-day baseline: 0 windows would have matched on any fleet machine.
+let SaturationPercent = 85.0;
+let MinimumBreachingSamples = 8;
+let FleetResourceIds = dynamic([
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k22",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-win2k25",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-sql",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-01",
+  "/subscriptions/5305e853-a63b-4b82-9a3f-6fde18c1a798/resourcegroups/rg-arcbox-itpro-weu-002/providers/microsoft.hybridcompute/machines/arcbox-ubuntu-02"
+]);
+InsightsMetrics
+| where TimeGenerated >= ago(15m)
+| where set_has_element(FleetResourceIds, tolower(_ResourceId))
+| where Namespace == "Processor" and Name == "UtilizationPercentage"
+| summarize
+    Samples = count(),
+    BreachingSamples = countif(Val >= SaturationPercent),
+    AverageCpuPercent = round(avg(Val), 1),
+    MaximumCpuPercent = round(max(Val), 1)
+    by Machine = tostring(split(tolower(_ResourceId), "/")[-1])
+| where BreachingSamples >= MinimumBreachingSamples
+| project Machine, Samples, BreachingSamples, AverageCpuPercent, MaximumCpuPercent
+| order by BreachingSamples desc, Machine asc
