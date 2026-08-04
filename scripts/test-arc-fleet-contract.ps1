@@ -436,6 +436,7 @@ foreach ($secretCandidate in @(
 $documentPaths = @(
     (Join-Path $repoRoot 'docs\arquitectura-arc-fleet-observability.md'),
     (Join-Path $repoRoot 'docs\guia-demo-arc-fleet-60min.md'),
+    (Join-Path $repoRoot 'docs\README-demo-arc.md'),
     (Join-Path $repoRoot 'docs\runbooks\arc-fleet-saturacion-recursos.md')
 )
 foreach ($documentPath in $documentPaths) {

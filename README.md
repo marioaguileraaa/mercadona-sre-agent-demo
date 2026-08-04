@@ -217,9 +217,12 @@ Planning is the default and performs no deployment:
 .\scripts\verify-arc-fleet-observability.ps1
 ```
 
-The Spanish architecture, 60-minute demo choreography, safety envelope, triage steps and rollback are
-documented in:
+The Spanish run sheet, architecture, 60-minute demo choreography, safety envelope, triage steps and
+rollback are documented in:
 
+- [`docs/README-demo-arc.md`](docs/README-demo-arc.md) — **start here to run the demo**: prerequisites,
+  one-time preparation, the timed execution sequence with real measured timings, recovery,
+  troubleshooting and a resource cheat sheet;
 - [`docs/arquitectura-arc-fleet-observability.md`](docs/arquitectura-arc-fleet-observability.md);
 - [`docs/guia-demo-arc-fleet-60min.md`](docs/guia-demo-arc-fleet-60min.md);
 - [`docs/runbooks/arc-fleet-saturacion-recursos.md`](docs/runbooks/arc-fleet-saturacion-recursos.md).

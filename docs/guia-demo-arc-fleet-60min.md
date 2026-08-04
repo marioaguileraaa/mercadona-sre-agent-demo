@@ -106,6 +106,11 @@ Puntos a decir en voz alta mientras se ejecuta:
 
 Apuntar el `CorrelationId` que imprime el script. Se usará en el tramo 6.
 
+Avisar a la sala de que **durante los primeros minutos no se verá nada**: Arc tarda de 1 a 3,5
+minutos en despachar el Run Command al invitado, y las métricas se muestrean cada 60 segundos. Es
+latencia esperada del plano de control, no un fallo. Por eso este tramo se ejecuta antes del
+recorrido del libro y no después.
+
 ## Tramo 3 (13-30): recorrido del libro
 
 Este es el bloque que responde literalmente a lo que pidió el cliente. Recorrer el libro de arriba
@@ -140,8 +145,12 @@ personales ni de mensajes de evento.
 
 ## Tramo 4 (30-40): las alertas y el agente
 
-Las alertas deben aparecer entre 4 y 8 minutos después del inicio de la presión: 8 muestras de 60 s
-más la latencia de ingesta y la cadencia de evaluación de 5 minutos.
+Las alertas aparecen entre 10 y 12 minutos después de lanzar la presión, medido en ensayo real: de 1
+a 3,5 minutos hasta que Arc despacha el Run Command, 8 muestras de 60 s por encima del umbral, más la
+latencia de ingesta y la cadencia de evaluación de 5 minutos. El hilo del agente se abre entre 70 y
+90 segundos después de la alerta. Si el tramo 2 se ejecuta en el minuto 10, las alertas caen sobre el
+minuto 22 (durante el recorrido del libro, que es el mejor momento para que suenen) y el agente ya
+tiene la investigación lista cuando empieza este tramo.
 
 1. Mostrar las dos alertas Sev2 disparadas, con el nombre `ArcBox FleetOps ...`.
 2. Abrir el Azure SRE Agent y enseñar el hilo de incidente que ha abierto el filtro
